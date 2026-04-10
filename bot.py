@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Состояния
-WAITING_IDEA, WAITING_QUESTION, WAITING_REPLY, LIVE_CHAT = range(4)
+WAITING_IDEA, WAITING_QUESTION, WAITING_REPLY, LIVE_CHAT_USER, LIVE_CHAT_ADMIN = range(5)
 
 # Активные чаты: {user_id: admin_id, admin_id: user_id}
 active_chats = {}
@@ -50,9 +50,12 @@ async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     username = user.username or user.full_name
     
-    # Проверяем, не в чате ли уже пользователь
     if user_id in active_chats:
-        await update.message.reply_text("⏳ Вы уже находитесь в чате с администратором.")
+        await update.message.reply_text(
+            "⏳ Вы уже находитесь в чате с администратором.\n"
+            "Используйте /stopchat для завершения.",
+            reply_markup=main_keyboard
+        )
         return ConversationHandler.END
     
     admin_kb = InlineKeyboardMarkup([
@@ -66,7 +69,9 @@ async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=f"📞 <b>Запрос на связь</b>\n\n👤 Пользователь: @{username} (ID: <code>{user_id}</code>)\n\nХочет связаться с администрацией.",
+                text=f"📞 <b>Запрос на связь</b>\n\n"
+                     f"👤 Пользователь: @{username} (ID: <code>{user_id}</code>)\n\n"
+                     f"Хочет связаться с администрацией.",
                 reply_markup=admin_kb,
                 parse_mode=ParseMode.HTML
             )
@@ -98,20 +103,27 @@ async def accept_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_chats[user_id] = admin_id
     active_chats[admin_id] = user_id
     
-    context.user_data["chat_partner"] = user_id
-    
-    await query.edit_message_text(f"✅ Вы приняли запрос от пользователя (ID: <code>{user_id}</code>).\n\n💬 Теперь все ваши сообщения будут пересылаться пользователю.\n📌 Для завершения чата отправьте /stopchat", parse_mode=ParseMode.HTML)
+    await query.edit_message_text(
+        f"✅ Вы приняли запрос от пользователя (ID: <code>{user_id}</code>).\n\n"
+        f"💬 Теперь все ваши сообщения будут пересылаться пользователю.\n"
+        f"📌 Для завершения чата отправьте /stopchat",
+        parse_mode=ParseMode.HTML
+    )
     
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text="🎉 <b>Администратор подключился!</b>\n\n💬 Теперь вы можете задать свой вопрос. Все ваши сообщения будут переданы администратору.\n📌 Для завершения чата отправьте /stopchat",
+            text="🎉 <b>Администратор подключился!</b>\n\n"
+                 "💬 Теперь вы можете задать свой вопрос. Все ваши сообщения будут переданы администратору.\n"
+                 "📌 Для завершения чата отправьте /stopchat",
             parse_mode=ParseMode.HTML
         )
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Ошибка отправки пользователю: {e}")
     
-    return LIVE_CHAT
+    # Устанавливаем состояние чата для админа
+    context.user_data["chat_partner"] = user_id
+    return LIVE_CHAT_ADMIN
 
 async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -124,45 +136,68 @@ async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = int(query.data.split("_")[2])
     
-    await query.edit_message_text(f"❌ Запрос от пользователя (ID: <code>{user_id}</code>) отклонён.", parse_mode=ParseMode.HTML)
+    await query.edit_message_text(
+        f"❌ Запрос от пользователя (ID: <code>{user_id}</code>) отклонён.",
+        parse_mode=ParseMode.HTML
+    )
     
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text="❌ К сожалению, администраторы сейчас не могут ответить. Попробуйте позже."
+            text="❌ К сожалению, администраторы сейчас не могут ответить. Попробуйте позже или оставьте вопрос через кнопку «❓ Задать вопрос»."
         )
     except:
         pass
 
-async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    message_text = update.message.text
-    
-    if user_id in active_chats:
-        partner_id = active_chats[user_id]
-        try:
-            # Определяем, кто отправитель
-            if user_id in ADMIN_IDS:
-                sender_name = "Администратор"
-            else:
-                sender_name = update.effective_user.username or update.effective_user.full_name
-            
-            await context.bot.send_message(
-                chat_id=partner_id,
-                text=f"💬 <b>{sender_name}:</b>\n{message_text}",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка отправки: {e}")
-    else:
-        # Если не в чате, обрабатываем как обычное сообщение
-        pass
-
-async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def forward_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересылка сообщений от пользователя к админу"""
     user_id = update.effective_user.id
     
     if user_id not in active_chats:
-        await update.message.reply_text("❌ Вы не находитесь в активном чате.")
+        # Не в чате - игнорируем
+        return
+    
+    admin_id = active_chats[user_id]
+    user_name = update.effective_user.username or update.effective_user.full_name
+    
+    try:
+        await context.bot.send_message(
+            chat_id=admin_id,
+            text=f"💬 <b>👤 {user_name}:</b>\n{update.message.text}",
+            parse_mode=ParseMode.HTML
+        )
+        logger.info(f"Сообщение от пользователя {user_id} переслано админу {admin_id}")
+    except Exception as e:
+        logger.error(f"Ошибка пересылки от пользователя к админу: {e}")
+        await update.message.reply_text("❌ Ошибка отправки сообщения. Попробуйте позже.")
+
+async def forward_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пересылка сообщений от админа к пользователю"""
+    admin_id = update.effective_user.id
+    
+    if admin_id not in active_chats:
+        # Не в чате - игнорируем
+        return
+    
+    user_id = active_chats[admin_id]
+    
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"💬 <b>👨‍💼 Администратор:</b>\n{update.message.text}",
+            parse_mode=ParseMode.HTML
+        )
+        logger.info(f"Сообщение от админа {admin_id} переслано пользователю {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка пересылки от админа к пользователю: {e}")
+        await update.message.reply_text("❌ Ошибка отправки сообщения пользователю.")
+
+async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Завершение чата"""
+    user_id = update.effective_user.id
+    
+    if user_id not in active_chats:
+        await update.message.reply_text("❌ Вы не находитесь в активном чате.", reply_markup=main_keyboard)
         return ConversationHandler.END
     
     partner_id = active_chats[user_id]
@@ -182,6 +217,8 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     
+    # Очищаем состояние
+    context.user_data.clear()
     return ConversationHandler.END
 
 # ========== СТАНДАРТНЫЕ ОБРАБОТЧИКИ ==========
@@ -466,16 +503,32 @@ if __name__ == "__main__":
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Чат с администрацией
+    # Обработчики для живого чата (должны быть ПЕРВЫМИ, чтобы не перехватывались другими)
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(user_id=list(active_chats.keys())) & ~filters.User(user_id=ADMIN_IDS),
+        forward_user_message
+    ))
+    
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_IDS) & filters.User(user_id=list(active_chats.keys())),
+        forward_admin_message
+    ))
+    
+    # ConversationHandler для чата
     chat_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat)],
         states={
-            LIVE_CHAT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, forward_message),
+            LIVE_CHAT_ADMIN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, forward_admin_message),
+                CommandHandler("stopchat", stop_chat)
+            ],
+            LIVE_CHAT_USER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, forward_user_message),
                 CommandHandler("stopchat", stop_chat)
             ]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
     )
     
     idea_conv = ConversationHandler(
@@ -513,6 +566,6 @@ if __name__ == "__main__":
     application.add_handler(CallbackQueryHandler(approve_button, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(reject_button, pattern="^reject_"))
     
-    print("✅ Бот запущен на Bothost.ru!")
+    print("✅ Бот запущен на Bothost.ru с функцией живого чата!")
     
     application.run_polling()
