@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Состояния
 WAITING_IDEA, WAITING_QUESTION, WAITING_REPLY = range(3)
-IN_CHAT = range(3, 4)  # Общее состояние для чата
+IN_CHAT = 3
 
 # Активные чаты
 active_chats = {}
@@ -47,6 +47,7 @@ main_keyboard = ReplyKeyboardMarkup(
 
 # ========== ЧАТ С АДМИНИСТРАЦИЕЙ ==========
 async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пользователь нажимает кнопку связи с администрацией"""
     user = update.effective_user
     user_id = user.id
     username = user.username or user.full_name
@@ -86,6 +87,7 @@ async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def accept_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ нажимает кнопку 'Принять'"""
     query = update.callback_query
     await query.answer()
     
@@ -100,10 +102,11 @@ async def accept_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Пользователь уже в чате с другим администратором.")
         return
     
+    # Устанавливаем двустороннюю связь
     active_chats[user_id] = admin_id
     active_chats[admin_id] = user_id
     
-    # Сохраняем информацию о чате для админа
+    # Сохраняем партнёра в user_data для админа
     context.user_data["chat_partner"] = user_id
     
     await query.edit_message_text(
@@ -124,9 +127,11 @@ async def accept_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка отправки пользователю: {e}")
     
+    # ВАЖНО: Возвращаем состояние, чтобы админ вошёл в чат
     return IN_CHAT
 
 async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ нажимает кнопку 'Отклонить'"""
     query = update.callback_query
     await query.answer()
     
@@ -145,25 +150,27 @@ async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text="❌ К сожалению, администраторы сейчас не могут ответить. Попробуйте позже или оставьте вопрос через кнопку «❓ Задать вопрос»."
+            text="❌ К сожалению, администраторы сейчас не могут ответить."
         )
     except:
         pass
 
 async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Универсальный обработчик сообщений в чате (и для админа, и для пользователя)"""
+    """Обработка сообщений в чате (вызывается только когда пользователь В СОСТОЯНИИ IN_CHAT)"""
     sender_id = update.effective_user.id
     
+    # Проверяем, что отправитель действительно в чате
     if sender_id not in active_chats:
+        await update.message.reply_text("❌ Вы не в чате.", reply_markup=main_keyboard)
         return ConversationHandler.END
     
     receiver_id = active_chats[sender_id]
-    sender_name = update.effective_user.username or update.effective_user.full_name
     
-    # Определяем, кто отправитель
+    # Определяем префикс
     if sender_id in ADMIN_IDS:
         prefix = "👨‍💼 Администратор"
     else:
+        sender_name = update.effective_user.username or update.effective_user.full_name
         prefix = f"👤 {sender_name}"
     
     try:
@@ -177,7 +184,7 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"❌ Ошибка отправки: {e}")
         await update.message.reply_text("❌ Не удалось отправить сообщение.")
     
-    return IN_CHAT
+    return IN_CHAT  # Остаёмся в чате
 
 async def stop_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение чата по команде /stopchat"""
@@ -496,7 +503,7 @@ if __name__ == "__main__":
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Чат с администрацией — ЕДИНЫЙ ConversationHandler
+    # Чат с администрацией
     chat_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat),
