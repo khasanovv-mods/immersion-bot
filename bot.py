@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, ContextTypes
 from telegram.constants import ParseMode
@@ -15,14 +16,14 @@ if not BOT_TOKEN:
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()] if ADMIN_IDS_STR else []
 
-from database import init_db, save_ticket, update_ticket_status, get_user_by_message, get_ticket_status
+from database import init_db, save_ticket, update_ticket_status, get_user_by_message, get_ticket_status, get_old_pending_tickets
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Состояния ТОЛЬКО для заявок
+# Состояния для заявок
 WAITING_IDEA, WAITING_QUESTION, WAITING_REPLY = range(3)
 
 # Активные чаты: {user_id: admin_id, admin_id: user_id}
@@ -44,7 +45,7 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ========== ЧАТ С АДМИНИСТРАЦИЕЙ (БЕЗ CONVERSATION HANDLER) ==========
+# ========== ЧАТ С АДМИНИСТРАЦИЕЙ ==========
 
 async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Пользователь нажимает кнопку связи с администрацией"""
@@ -152,11 +153,9 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Обработка ВСЕХ текстовых сообщений с проверкой на чат"""
     sender_id = update.effective_user.id
     
-    # Проверяем, находится ли отправитель в активном чате
     if sender_id in active_chats:
         receiver_id = active_chats[sender_id]
         
-        # Определяем префикс
         if sender_id in ADMIN_IDS:
             prefix = "👨‍💼 Администратор"
         else:
@@ -173,8 +172,6 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             logger.error(f"❌ Ошибка отправки: {e}")
             await update.message.reply_text("❌ Не удалось отправить сообщение.")
-        
-        return  # Выходим, чтобы не мешать другим обработчикам
 
 async def stop_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение чата по команде /stopchat"""
@@ -207,6 +204,61 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Я бот для связи с командой.\nВыберите действие:",
         reply_markup=main_keyboard
     )
+
+# ========== НАПОМИНАНИЯ АДМИНАМ ==========
+async def check_pending_tickets(context: ContextTypes.DEFAULT_TYPE):
+    """Проверка заявок, висящих более 24 часов"""
+    tickets = await get_old_pending_tickets(hours=24)
+    
+    if tickets:
+        count = len(tickets)
+        text = f"⚠️ <b>Внимание!</b>\n\n"
+        text += f"🔴 <b>{count}</b> заявок ожидают ответа более 24 часов:\n\n"
+        
+        for t in tickets[:10]:  # Показываем первые 10
+            created = datetime.fromisoformat(t['created_at'])
+            hours_ago = int((datetime.now() - created).total_seconds() / 3600)
+            text += f"• #{t['id']} ({t['type']}) — {hours_ago} ч. назад\n"
+        
+        if count > 10:
+            text += f"\n... и ещё {count - 10} заявок"
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML
+                )
+                logger.info(f"✅ Напоминание отправлено админу {admin_id}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки напоминания админу {admin_id}: {e}")
+
+async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /pending — показать все ожидающие заявки"""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Нет прав")
+        return
+    
+    hours = int(context.args[0]) if context.args else 0
+    tickets = await get_old_pending_tickets(hours=hours)
+    
+    if not tickets:
+        await update.message.reply_text(f"✅ Нет заявок, ожидающих более {hours} ч.")
+        return
+    
+    text = f"📋 <b>Заявки в ожидании</b>"
+    if hours > 0:
+        text += f" (более {hours} ч.)"
+    text += ":\n\n"
+    
+    for t in tickets[:15]:
+        created = datetime.fromisoformat(t['created_at'])
+        hours_ago = int((datetime.now() - created).total_seconds() / 3600)
+        status_emoji = "🟢" if hours_ago < 12 else ("🟡" if hours_ago < 24 else "🔴")
+        text += f"{status_emoji} #{t['id']} ({t['type']}) — {hours_ago} ч. назад\n"
+    
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ========== ОТПРАВИТЬ ИДЕЮ ==========
 async def idea_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -491,13 +543,11 @@ if __name__ == "__main__":
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # ОБРАБОТЧИКИ ЧАТА (БЕЗ CONVERSATION HANDLER)
-    # Просто обычные обработчики
+    # Обработчики чата
     application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
     application.add_handler(CommandHandler("stopchat", stop_chat_command))
     application.add_handler(CallbackQueryHandler(accept_chat, pattern="^accept_"))
     application.add_handler(CallbackQueryHandler(reject_chat, pattern="^reject_"))
-    # Обработчик сообщений чата — ДОЛЖЕН БЫТЬ ПЕРВЫМ среди текстовых
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_message), group=0)
     
     # ConversationHandler для заявок
@@ -526,12 +576,19 @@ if __name__ == "__main__":
     )
     
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("pending", cmd_pending))
     application.add_handler(idea_conv)
     application.add_handler(question_conv)
     application.add_handler(reply_conv)
     application.add_handler(CallbackQueryHandler(approve_button, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(reject_button, pattern="^reject_"))
     
-    print("✅ Бот запущен! (чат работает без ConversationHandler)")
+    # Запускаем проверку каждые 60 минут
+    job_queue = application.job_queue
+    if job_queue:
+        job_queue.run_repeating(check_pending_tickets, interval=3600, first=10)
+        logger.info("✅ Напоминания настроены (каждый час)")
+    
+    print("✅ Бот запущен с напоминаниями!")
     
     application.run_polling()
