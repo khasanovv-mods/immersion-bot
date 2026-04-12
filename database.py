@@ -2,7 +2,6 @@ import aiosqlite
 
 DB_NAME = "bot_database.db"
 
-# Создаем таблицу при первом запуске
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('''
@@ -19,7 +18,6 @@ async def init_db():
         ''')
         await db.commit()
 
-# Сохранить заявку в базу
 async def save_ticket(user_id, username, message_id, ticket_type, content):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -28,7 +26,6 @@ async def save_ticket(user_id, username, message_id, ticket_type, content):
         )
         await db.commit()
 
-# Обновить статус заявки
 async def update_ticket_status(message_id, status):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -37,7 +34,6 @@ async def update_ticket_status(message_id, status):
         )
         await db.commit()
 
-# Получить ID пользователя и тип заявки по message_id
 async def get_user_by_message(message_id):
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
@@ -47,7 +43,6 @@ async def get_user_by_message(message_id):
         row = await cursor.fetchone()
         return row if row else (None, None)
 
-# Получить статус заявки по message_id
 async def get_ticket_status(message_id):
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
@@ -56,101 +51,3 @@ async def get_ticket_status(message_id):
         )
         row = await cursor.fetchone()
         return row[0] if row else None
-
-# Получить полную статистику по заявкам
-async def get_stats():
-    async with aiosqlite.connect(DB_NAME) as db:
-        # Всего заявок
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets")
-        total = (await cursor.fetchone())[0]
-        
-        # В ожидании
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'pending'")
-        pending = (await cursor.fetchone())[0]
-        
-        # Одобрено
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'approved'")
-        approved = (await cursor.fetchone())[0]
-        
-        # Отклонено
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'rejected'")
-        rejected = (await cursor.fetchone())[0]
-        
-        # Отвечено
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'answered'")
-        answered = (await cursor.fetchone())[0]
-        
-        return {
-            'total': total,
-            'pending': pending,
-            'approved': approved,
-            'rejected': rejected,
-            'answered': answered
-        }
-
-# Получить заявку по ID (для веб-панели)
-async def get_ticket_by_id(ticket_id):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "SELECT * FROM tickets WHERE id = ?",
-            (ticket_id,)
-        )
-        row = await cursor.fetchone()
-        if row:
-            return {
-                'id': row[0],
-                'user_id': row[1],
-                'user_username': row[2],
-                'message_id': row[3],
-                'type': row[4],
-                'content': row[5],
-                'status': row[6],
-                'created_at': row[7]
-            }
-        return None
-
-# Получить все заявки (для веб-панели, с фильтром по статусу)
-async def get_all_tickets(status_filter=None):
-    async with aiosqlite.connect(DB_NAME) as db:
-        if status_filter and status_filter != 'all':
-            cursor = await db.execute(
-                "SELECT * FROM tickets WHERE status = ? ORDER BY created_at DESC",
-                (status_filter,)
-            )
-        else:
-            cursor = await db.execute(
-                "SELECT * FROM tickets ORDER BY created_at DESC"
-            )
-        
-        rows = await cursor.fetchall()
-        tickets = []
-        for row in rows:
-            tickets.append({
-                'id': row[0],
-                'user_id': row[1],
-                'user_username': row[2],
-                'message_id': row[3],
-                'type': row[4],
-                'content': row[5],
-                'status': row[6],
-                'created_at': row[7]
-            })
-        return tickets
-
-# Обновить статус заявки по ID (для веб-панели)
-async def update_ticket_status_by_id(ticket_id, status):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "UPDATE tickets SET status = ? WHERE id = ?",
-            (status, ticket_id)
-        )
-        await db.commit()
-
-# Удалить заявку (опционально, для админов)
-async def delete_ticket(ticket_id):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "DELETE FROM tickets WHERE id = ?",
-            (ticket_id,)
-        )
-        await db.commit()
