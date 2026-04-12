@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, ContextTypes
 from telegram.constants import ParseMode
@@ -25,11 +24,6 @@ logger = logging.getLogger(__name__)
 
 # Состояния
 WAITING_IDEA, WAITING_QUESTION, WAITING_REPLY = range(3)
-IN_CHAT_USER, IN_CHAT_ADMIN = range(3, 5)
-
-# Активные чаты: {user_id: admin_id, admin_id: user_id}
-active_chats = {}
-chat_history = {}
 
 ticket_counter = 0
 
@@ -41,228 +35,12 @@ def get_next_ticket_number():
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="💡 Отправить идею")],
-        [KeyboardButton(text="❓ Задать вопрос")],
-        [KeyboardButton(text="📞 Связь с администрацией")]
+        [KeyboardButton(text="❓ Задать вопрос")]
     ],
     resize_keyboard=True
 )
 
-admin_chat_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="👋 Здравствуйте! Сейчас отвечу.")],
-        [KeyboardButton(text="❓ Уточните, пожалуйста, вопрос.")],
-        [KeyboardButton(text="✅ Спасибо за обращение!")],
-        [KeyboardButton(text="🔴 /stopchat")]
-    ],
-    resize_keyboard=True
-)
-
-# ========== ЧАТ С АДМИНИСТРАЦИЕЙ ==========
-async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    username = user.username or user.full_name
-    
-    if user_id in active_chats:
-        await update.message.reply_text(
-            "⏳ Вы уже находитесь в чате с администратором.\n"
-            "Используйте /stopchat для завершения.",
-            reply_markup=main_keyboard
-        )
-        return ConversationHandler.END
-    
-    admin_kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Принять", callback_data=f"accept_{user_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}")
-        ]
-    ])
-    
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=f"📞 <b>Запрос на связь</b>\n\n"
-                     f"👤 Пользователь: @{username} (ID: <code>{user_id}</code>)\n\n"
-                     f"Хочет связаться с администрацией.",
-                reply_markup=admin_kb,
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.error(f"Ошибка отправки админу {admin_id}: {e}")
-    
-    await update.message.reply_text(
-        "✅ Ваш запрос отправлен администраторам.\n⏳ Ожидайте ответа...",
-        reply_markup=main_keyboard
-    )
-    return ConversationHandler.END
-
-async def accept_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    admin_id = query.from_user.id
-    if admin_id not in ADMIN_IDS:
-        await query.answer("⛔ Нет прав", show_alert=True)
-        return
-    
-    user_id = int(query.data.split("_")[1])
-    
-    if user_id in active_chats:
-        await query.edit_message_text("❌ Пользователь уже в чате с другим администратором.")
-        return
-    
-    active_chats[user_id] = admin_id
-    active_chats[admin_id] = user_id
-    chat_history[user_id] = []
-    
-    await query.edit_message_text(
-        f"✅ Вы приняли запрос от пользователя (ID: <code>{user_id}</code>).\n\n"
-        f"💬 Теперь все ваши сообщения будут пересылаться пользователю.\n"
-        f"📌 Для завершения чата отправьте /stopchat",
-        parse_mode=ParseMode.HTML
-    )
-    
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="🎉 <b>Администратор подключился!</b>\n\n"
-                 "💬 Теперь вы можете задать свой вопрос. Все ваши сообщения будут переданы администратору.\n"
-                 "📌 Для завершения чата отправьте /stopchat",
-            parse_mode=ParseMode.HTML
-        )
-    except Exception as e:
-        logger.error(f"Ошибка отправки пользователю: {e}")
-    
-    await context.bot.send_message(
-        chat_id=admin_id,
-        text="💬 Вы в чате. Используйте быстрые ответы:",
-        reply_markup=admin_chat_keyboard
-    )
-    
-    context.user_data["chat_partner"] = user_id
-    return IN_CHAT_ADMIN
-
-async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    admin_id = query.from_user.id
-    if admin_id not in ADMIN_IDS:
-        await query.answer("⛔ Нет прав", show_alert=True)
-        return
-    
-    user_id = int(query.data.split("_")[1])
-    
-    await query.edit_message_text(
-        f"❌ Запрос от пользователя (ID: <code>{user_id}</code>) отклонён.",
-        parse_mode=ParseMode.HTML
-    )
-    
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="❌ К сожалению, администраторы сейчас не могут ответить. Попробуйте позже или оставьте вопрос через кнопку «❓ Задать вопрос»."
-        )
-    except:
-        pass
-
-async def chat_message_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id not in active_chats:
-        return ConversationHandler.END
-    
-    admin_id = active_chats[user_id]
-    user_name = update.effective_user.username or update.effective_user.full_name
-    message_text = update.message.text
-    
-    chat_history[user_id].append(f"👤 {user_name}: {message_text}")
-    
-    try:
-        await context.bot.send_message(
-            chat_id=admin_id,
-            text=f"💬 <b>👤 {user_name}:</b>\n{message_text}",
-            parse_mode=ParseMode.HTML
-        )
-        logger.info(f"✅ Сообщение от {user_id} доставлено админу {admin_id}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки админу: {e}")
-        await update.message.reply_text("❌ Не удалось отправить сообщение. Попробуйте позже.")
-    
-    return IN_CHAT_USER
-
-async def chat_message_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = update.effective_user.id
-    
-    if admin_id not in active_chats:
-        return ConversationHandler.END
-    
-    user_id = active_chats[admin_id]
-    message_text = update.message.text
-    
-    if message_text == "🔴 /stopchat":
-        return await stop_chat(update, context)
-    
-    chat_history[user_id].append(f"👨‍💼 Администратор: {message_text}")
-    
-    await context.bot.send_chat_action(chat_id=user_id, action="typing")
-    await asyncio.sleep(0.5)
-    
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"💬 <b>👨‍💼 Администратор:</b>\n{message_text}",
-            parse_mode=ParseMode.HTML
-        )
-        logger.info(f"✅ Сообщение от админа {admin_id} доставлено пользователю {user_id}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки пользователю: {e}")
-        await update.message.reply_text("❌ Не удалось отправить сообщение пользователю.")
-    
-    return IN_CHAT_ADMIN
-
-async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id not in active_chats:
-        await update.message.reply_text("❌ Вы не находитесь в активном чате.", reply_markup=main_keyboard)
-        return ConversationHandler.END
-    
-    partner_id = active_chats[user_id]
-    admin_id = user_id if user_id in ADMIN_IDS else partner_id
-    actual_user_id = partner_id if user_id in ADMIN_IDS else user_id
-    
-    if actual_user_id in chat_history and chat_history[actual_user_id]:
-        history_text = "\n".join(chat_history[actual_user_id][-20:])
-        try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=f"📝 <b>История чата:</b>\n\n{history_text}",
-                parse_mode=ParseMode.HTML
-            )
-        except:
-            pass
-        del chat_history[actual_user_id]
-    
-    del active_chats[user_id]
-    del active_chats[partner_id]
-    
-    await update.message.reply_text("🔴 Чат завершён.", reply_markup=main_keyboard)
-    
-    try:
-        await context.bot.send_message(
-            chat_id=partner_id,
-            text="🔴 <b>Чат завершён второй стороной.</b>",
-            parse_mode=ParseMode.HTML
-        )
-    except:
-        pass
-    
-    context.user_data.clear()
-    return ConversationHandler.END
-
-# ========== СТАНДАРТНЫЕ ОБРАБОТЧИКИ ==========
+# ========== КОМАНДА /start ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 Привет, {update.effective_user.full_name}!\n\n"
@@ -270,25 +48,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard
     )
 
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Нет прав")
-        return
-    
-    from database import get_stats
-    stats = await get_stats()
-    
-    text = (
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"├── Всего заявок: {stats['total']}\n"
-        f"├── В ожидании: {stats['pending']}\n"
-        f"├── Одобрено: {stats['approved']}\n"
-        f"├── Отклонено: {stats['rejected']}\n"
-        f"├── Отвечено: {stats['answered']}\n"
-        f"└── Активных чатов: {len(active_chats) // 2}"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
+# ========== ОТПРАВИТЬ ИДЕЮ ==========
 async def idea_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📝 Опишите свою идею ниже:",
@@ -296,6 +56,7 @@ async def idea_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return WAITING_IDEA
 
+# ========== ЗАДАТЬ ВОПРОС ==========
 async def question_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❓ Опишите ваш вопрос ниже:",
@@ -303,6 +64,7 @@ async def question_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return WAITING_QUESTION
 
+# ========== ПОЛУЧЕНИЕ ИДЕИ ==========
 async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "без username"
@@ -343,6 +105,7 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+# ========== ПОЛУЧЕНИЕ ВОПРОСА ==========
 async def process_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "без username"
@@ -380,6 +143,7 @@ async def process_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+# ========== КНОПКА "ОТВЕТИТЬ" ==========
 async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -403,6 +167,7 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(f"✏️ Напишите ответ пользователю (заявка #{ticket_num}):")
     return WAITING_REPLY
 
+# ========== ОТПРАВКА ОТВЕТА ==========
 async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return ConversationHandler.END
@@ -452,6 +217,7 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
+# ========== ОДОБРЕНИЕ ИДЕИ ==========
 async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -501,6 +267,7 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("❌ Пользователь не найден", show_alert=True)
 
+# ========== ОТКЛОНЕНИЕ ИДЕИ ==========
 async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -550,43 +317,19 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("❌ Пользователь не найден", show_alert=True)
 
+# ========== ОТМЕНА ==========
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Действие отменено.", reply_markup=main_keyboard)
     return ConversationHandler.END
 
 # ========== ЗАПУСК ==========
-def run_bot():
-    """Запуск бота в основном потоке"""
+if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     loop.run_until_complete(init_db())
     
     application = Application.builder().token(BOT_TOKEN).build()
-    
-    user_chat_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat)],
-        states={
-            IN_CHAT_USER: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, chat_message_user),
-                CommandHandler("stopchat", stop_chat)
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    )
-    
-    admin_chat_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(accept_chat, pattern="^accept_")],
-        states={
-            IN_CHAT_ADMIN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, chat_message_admin),
-                CommandHandler("stopchat", stop_chat)
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    )
     
     idea_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💡 Отправить идею$"), idea_start)],
@@ -613,34 +356,12 @@ def run_bot():
     )
     
     application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("stats", cmd_stats))
-    application.add_handler(CommandHandler("stopchat", stop_chat))
-    application.add_handler(user_chat_conv)
-    application.add_handler(admin_chat_conv)
     application.add_handler(idea_conv)
     application.add_handler(question_conv)
     application.add_handler(reply_conv)
-    application.add_handler(CallbackQueryHandler(reject_chat, pattern="^reject_"))
     application.add_handler(CallbackQueryHandler(approve_button, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(reject_button, pattern="^reject_"))
     
     print("✅ Бот запущен!")
-    application.run_polling()
-
-def run_web_panel():
-    """Запуск веб-панели в отдельном потоке"""
-    try:
-        from web_panel import run_web_panel as start_web
-        start_web(host='0.0.0.0', port=5000)
-    except ImportError:
-        print("⚠️ Веб-панель не найдена. Убедитесь, что файл web_panel.py существует.")
-    except Exception as e:
-        print(f"❌ Ошибка запуска веб-панели: {e}")
-
-if __name__ == "__main__":
-    # Запускаем веб-панель в отдельном потоке
-    web_thread = threading.Thread(target=run_web_panel, daemon=True)
-    web_thread.start()
     
-    # Запускаем бота в основном потоке
-    run_bot()
+    application.run_polling()
