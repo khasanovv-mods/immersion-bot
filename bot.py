@@ -4,11 +4,10 @@
 import asyncio
 import logging
 import os
-import json
 import uuid
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, WebAppInfo, LabeledPrice
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, ContextTypes, PreCheckoutQueryHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, ContextTypes
 from telegram.constants import ParseMode
 
 # ========== НАСТРОЙКИ ==========
@@ -19,15 +18,9 @@ if not BOT_TOKEN:
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()] if ADMIN_IDS_STR else []
 
-# Настройки Telegram Stars
-PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
-
 # Настройки ЮMoney
 YOOMONEY_TOKEN = os.getenv("YOOMONEY_TOKEN", "")
 YOOMONEY_RECEIVER = os.getenv("YOOMONEY_RECEIVER", "")
-
-# URL для WebApp
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://your-webapp-url.com")
 
 # ========== ИМПОРТ БАЗЫ ДАННЫХ ==========
 from database import init_db, save_ticket, update_ticket_status, get_user_by_message, get_ticket_status, get_old_pending_tickets, save_order
@@ -41,8 +34,9 @@ logger = logging.getLogger(__name__)
 # ========== СОСТОЯНИЯ ==========
 WAITING_IDEA, WAITING_QUESTION, WAITING_REPLY = range(3)
 
-# Активные чаты
+# Активные чаты и корзины
 active_chats = {}
+user_carts = {}
 pending_payments = {}
 
 ticket_counter = 0
@@ -52,80 +46,235 @@ def get_next_ticket_number():
     ticket_counter += 1
     return ticket_counter
 
+# ========== КАТАЛОГ ТОВАРОВ ==========
+CATALOG = {
+    "futbolki": {
+        "name": "👕 Футболки",
+        "products": {
+            "fut_1": {"name": "Футболка «Классика»", "desc": "Хлопок 100%, размеры S-XXL", "price": 1500},
+            "fut_2": {"name": "Футболка «Премиум»", "desc": "Органический хлопок", "price": 2200},
+        }
+    },
+    "hoodie": {
+        "name": "🧥 Худи",
+        "products": {
+            "hoodie_1": {"name": "Худи «Базовое»", "desc": "Флис, капюшон", "price": 3500},
+            "hoodie_2": {"name": "Худи «Оверсайз»", "desc": "Свободный крой", "price": 3900},
+        }
+    },
+    "caps": {
+        "name": "🧢 Кепки",
+        "products": {
+            "cap_1": {"name": "Кепка «Снэпбэк»", "desc": "Регулируемый размер", "price": 1200},
+            "cap_2": {"name": "Кепка «Бейсболка»", "desc": "Классическая", "price": 900},
+        }
+    }
+}
+
 # ========== КЛАВИАТУРА ==========
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="💡 Отправить идею")],
         [KeyboardButton(text="❓ Задать вопрос")],
-        [KeyboardButton(text="🛍️ Каталог товаров", web_app=WebAppInfo(url=WEBAPP_URL))],
+        [KeyboardButton(text="🛍️ Каталог")],
+        [KeyboardButton(text="🛒 Корзина")],
         [KeyboardButton(text="📞 Связь с администрацией")]
     ],
     resize_keyboard=True
 )
 
-# ========== ОПЛАТА TELEGRAM STARS ==========
-async def process_stars_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, product_name: str, product_price: int):
-    try:
-        await context.bot.send_invoice(
-            chat_id=user_id,
-            title=product_name,
-            description=f"Покупка товара: {product_name}",
-            payload=f"order_{uuid.uuid4().hex[:8]}",
-            provider_token=PROVIDER_TOKEN,
-            currency="XTR",
-            prices=[LabeledPrice(product_name, product_price)],
-            start_parameter="catalog",
-            need_name=False,
-            need_phone_number=False,
-            need_email=False,
-            need_shipping_address=False,
-            is_flexible=False
-        )
-        logger.info(f"✅ Счёт Stars отправлен пользователю {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания счёта Stars: {e}")
-        return False
-
-async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    await query.answer(ok=True)
-
-async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    payment = update.message.successful_payment
-    
-    await save_order(
-        user_id=user.id,
-        username=user.username or user.full_name,
-        order_id=payment.invoice_payload,
-        product_name="Товар из каталога",
-        amount=payment.total_amount,
-        currency=payment.currency,
-        payment_method="stars"
-    )
-    
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=(
-                    f"🛒 <b>Новый заказ оплачен через Stars!</b>\n\n"
-                    f"👤 Пользователь: @{user.username or user.full_name}\n"
-                    f"💰 Сумма: {payment.total_amount} {payment.currency}"
-                ),
-                parse_mode=ParseMode.HTML
-            )
-        except:
-            pass
+# ========== КАТАЛОГ ==========
+async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = []
+    for cat_id, cat_data in CATALOG.items():
+        keyboard.append([InlineKeyboardButton(cat_data["name"], callback_data=f"cat_{cat_id}")])
     
     await update.message.reply_text(
-        "✅ <b>Оплата прошла успешно!</b>\n\nСпасибо за покупку! Администратор свяжется с вами.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_keyboard
+        "🛍️ <b>Каталог товаров</b>\n\nВыберите категорию:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
     )
 
-# ========== ОПЛАТА ЮMONEY ==========
+async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    cat_id = query.data.split("_")[1]
+    cat_data = CATALOG.get(cat_id)
+    if not cat_data:
+        return
+    
+    keyboard = []
+    for prod_id, prod in cat_data["products"].items():
+        keyboard.append([InlineKeyboardButton(
+            f"{prod['name']} — {prod['price']} ₽",
+            callback_data=f"product_{cat_id}_{prod_id}"
+        )])
+    keyboard.append([InlineKeyboardButton("« Назад к категориям", callback_data="back_to_catalog")])
+    
+    await query.edit_message_text(
+        f"🛍️ <b>{cat_data['name']}</b>\n\nВыберите товар:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    parts = query.data.split("_")
+    cat_id, prod_id = parts[1], parts[2]
+    product = CATALOG.get(cat_id, {}).get("products", {}).get(prod_id)
+    if not product:
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить в корзину", callback_data=f"addtocart_{cat_id}_{prod_id}")],
+        [InlineKeyboardButton("« Назад к товарам", callback_data=f"cat_{cat_id}")]
+    ]
+    
+    await query.edit_message_text(
+        f"🛍️ <b>{product['name']}</b>\n\n📝 {product['desc']}\n💰 Цена: <b>{product['price']} ₽</b>",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML
+    )
+
+async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    parts = query.data.split("_")
+    cat_id, prod_id = parts[1], parts[2]
+    product = CATALOG[cat_id]["products"][prod_id]
+    
+    if user_id not in user_carts:
+        user_carts[user_id] = {}
+    
+    cart_key = f"{cat_id}_{prod_id}"
+    if cart_key in user_carts[user_id]:
+        user_carts[user_id][cart_key]["quantity"] += 1
+    else:
+        user_carts[user_id][cart_key] = {
+            "name": product["name"],
+            "price": product["price"],
+            "quantity": 1
+        }
+    
+    await query.answer(f"✅ {product['name']} добавлен в корзину!", show_alert=True)
+
+# ========== КОРЗИНА ==========
+async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await show_cart_internal(update, user_id)
+
+async def show_cart_internal(update, user_id):
+    cart = user_carts.get(user_id, {})
+    
+    if not cart:
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛍️ Перейти в каталог", callback_data="back_to_catalog")]])
+        if isinstance(update, Update):
+            await update.message.reply_text("🛒 Ваша корзина пуста.", reply_markup=keyboard)
+        else:
+            await update.edit_message_text("🛒 Ваша корзина пуста.", reply_markup=keyboard)
+        return
+    
+    text = "🛒 <b>Ваша корзина</b>\n\n"
+    total = 0
+    keyboard = []
+    
+    for cart_key, item in cart.items():
+        item_total = item["price"] * item["quantity"]
+        total += item_total
+        text += f"• {item['name']} x{item['quantity']} — {item_total} ₽\n"
+        keyboard.append([
+            InlineKeyboardButton("➖", callback_data=f"cart_dec_{cart_key}"),
+            InlineKeyboardButton(f"{item['quantity']}", callback_data="noop"),
+            InlineKeyboardButton("➕", callback_data=f"cart_inc_{cart_key}"),
+            InlineKeyboardButton("❌", callback_data=f"cart_rem_{cart_key}")
+        ])
+    
+    text += f"\n💰 <b>Итого: {total} ₽</b>"
+    keyboard.append([InlineKeyboardButton("💳 Оформить заказ", callback_data="checkout")])
+    keyboard.append([InlineKeyboardButton("🗑️ Очистить корзину", callback_data="cart_clear")])
+    keyboard.append([InlineKeyboardButton("« Назад в каталог", callback_data="back_to_catalog")])
+    
+    if isinstance(update, Update):
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+    else:
+        await update.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+
+async def cart_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    parts = query.data.split("_")
+    action, cart_key = parts[1], parts[2]
+    
+    if user_id not in user_carts or cart_key not in user_carts[user_id]:
+        await query.edit_message_text("❌ Товар не найден")
+        return
+    
+    if action == "inc":
+        user_carts[user_id][cart_key]["quantity"] += 1
+    elif action == "dec":
+        user_carts[user_id][cart_key]["quantity"] -= 1
+        if user_carts[user_id][cart_key]["quantity"] <= 0:
+            del user_carts[user_id][cart_key]
+    elif action == "rem":
+        del user_carts[user_id][cart_key]
+    
+    await show_cart_internal(query, user_id)
+
+async def cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if user_id in user_carts:
+        user_carts[user_id] = {}
+    
+    await query.edit_message_text(
+        "🗑️ Корзина очищена.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛍️ Перейти в каталог", callback_data="back_to_catalog")]])
+    )
+
+# ========== ОФОРМЛЕНИЕ ЗАКАЗА ==========
+async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    cart = user_carts.get(user_id, {})
+    
+    if not cart:
+        await query.edit_message_text("❌ Корзина пуста")
+        return
+    
+    total = sum(item["price"] * item["quantity"] for item in cart.values())
+    items_text = "\n".join([f"• {item['name']} x{item['quantity']}" for item in cart.values()])
+    order_id = f"order_{user_id}_{uuid.uuid4().hex[:8]}"
+    payment_link = generate_yoomoney_link(total, f"Заказ {order_id}", order_id)
+    
+    pending_payments[order_id] = {
+        "user_id": user_id,
+        "cart": {k: v.copy() for k, v in cart.items()},
+        "total": total,
+        "created_at": datetime.now()
+    }
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Перейти к оплате", url=payment_link)],
+        [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_{order_id}")]
+    ])
+    
+    await query.edit_message_text(
+        f"🛒 <b>Оформление заказа</b>\n\n{items_text}\n\n💰 <b>Итого к оплате: {total} ₽</b>\n\nНажмите кнопку ниже для оплаты.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
 def generate_yoomoney_link(amount: int, description: str, label: str) -> str:
     base_url = "https://yoomoney.ru/quickpay/confirm"
     params = {
@@ -136,157 +285,77 @@ def generate_yoomoney_link(amount: int, description: str, label: str) -> str:
         "sum": amount,
         "label": label
     }
-    param_str = "&".join([f"{k}={v}" for k, v in params.items()])
-    return f"{base_url}?{param_str}"
+    return f"{base_url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
+
+async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    order_id = query.data.split("_")[1]
+    payment_info = pending_payments.get(order_id)
+    
+    if not payment_info:
+        await query.edit_message_text("❌ Заказ не найден.")
+        return
+    
+    is_paid = await check_yoomoney_payment(order_id)
+    
+    if is_paid:
+        user_id = payment_info["user_id"]
+        cart = payment_info["cart"]
+        total = payment_info["total"]
+        
+        items_text = ", ".join([f"{item['name']} x{item['quantity']}" for item in cart.values()])
+        await save_order(user_id, query.from_user.username or query.from_user.full_name, order_id, items_text[:100], total, "RUB", "yoomoney")
+        
+        if user_id in user_carts:
+            user_carts[user_id] = {}
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🛒 <b>Новый заказ!</b>\n\n👤 @{query.from_user.username}\n🆔 {order_id}\n💰 {total} ₽\n📦 {items_text}",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+        
+        await query.edit_message_text("✅ <b>Оплата подтверждена!</b>\n\nСпасибо за заказ!", parse_mode=ParseMode.HTML)
+        del pending_payments[order_id]
+    else:
+        await query.edit_message_text(
+            "⏳ <b>Оплата ещё не поступила</b>\n\nПопробуйте позже.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Проверить снова", callback_data=f"paid_{order_id}")]])
+        )
 
 async def check_yoomoney_payment(label: str) -> bool:
     if not YOOMONEY_TOKEN:
         return False
     try:
         import aiohttp
-        headers = {"Authorization": f"Bearer {YOOMONEY_TOKEN}"}
-        url = "https://yoomoney.ru/api/operation-history"
-        data = {"label": label, "records": 10}
-        
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, data=data) as resp:
+            headers = {"Authorization": f"Bearer {YOOMONEY_TOKEN}"}
+            async with session.post("https://yoomoney.ru/api/operation-history", headers=headers, data={"label": label, "records": 10}) as resp:
                 if resp.status == 200:
                     result = await resp.json()
-                    if "operations" in result:
-                        for op in result["operations"]:
-                            if op.get("label") == label and op.get("status") == "success":
-                                return True
+                    for op in result.get("operations", []):
+                        if op.get("label") == label and op.get("status") == "success":
+                            return True
         return False
-    except Exception as e:
-        logger.error(f"Ошибка проверки платежа ЮMoney: {e}")
+    except:
         return False
 
-async def process_yoomoney_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, product_name: str, product_price: int):
-    label = f"order_{user_id}_{uuid.uuid4().hex[:8]}"
-    payment_link = generate_yoomoney_link(product_price, product_name, label)
-    
-    pending_payments[label] = {
-        "user_id": user_id,
-        "product_name": product_name,
-        "amount": product_price,
-        "created_at": datetime.now()
-    }
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Перейти к оплате", url=payment_link)],
-        [InlineKeyboardButton("✅ Я оплатил", callback_data=f"check_yoomoney_{label}")]
-    ])
-    
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=(
-            f"💳 <b>Оплата через ЮMoney</b>\n\n"
-            f"🛍️ Товар: {product_name}\n"
-            f"💰 Сумма: {product_price} руб.\n\n"
-            f"Нажмите кнопку ниже для оплаты. После оплаты нажмите «✅ Я оплатил»."
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
-
-async def check_yoomoney_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== НАВИГАЦИЯ ==========
+async def back_to_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    label = query.data.split("_", 2)[2]
-    payment_info = pending_payments.get(label)
-    
-    if not payment_info:
-        await query.edit_message_text("❌ Платёж не найден.")
-        return
-    
-    is_paid = await check_yoomoney_payment(label)
-    
-    if is_paid:
-        user_id = payment_info["user_id"]
-        product_name = payment_info["product_name"]
-        amount = payment_info["amount"]
-        
-        await save_order(
-            user_id=user_id,
-            username=query.from_user.username or query.from_user.full_name,
-            order_id=label,
-            product_name=product_name,
-            amount=amount,
-            currency="RUB",
-            payment_method="yoomoney"
-        )
-        
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=(
-                        f"🛒 <b>Новый заказ оплачен через ЮMoney!</b>\n\n"
-                        f"👤 Пользователь: @{query.from_user.username}\n"
-                        f"🛍️ Товар: {product_name}\n"
-                        f"💰 Сумма: {amount} руб."
-                    ),
-                    parse_mode=ParseMode.HTML
-                )
-            except:
-                pass
-        
-        await query.edit_message_text(
-            "✅ <b>Оплата подтверждена!</b>\n\nСпасибо за покупку!",
-            parse_mode=ParseMode.HTML
-        )
-        del pending_payments[label]
-    else:
-        await query.edit_message_text(
-            "⏳ <b>Оплата ещё не поступила</b>\n\nПопробуйте позже.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Проверить снова", callback_data=f"check_yoomoney_{label}")]
-            ])
-        )
+    keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"cat_{cat_id}")] for cat_id, cat in CATALOG.items()]
+    await query.edit_message_text("🛍️ <b>Каталог товаров</b>\n\nВыберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
 
-# ========== ОБРАБОТЧИК WEBAPP ==========
-async def webapp_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    data = json.loads(update.effective_message.web_app_data.data)
-    
-    product_name = data.get("product_name", "Неизвестный товар")
-    product_price = data.get("product_price", 0)
-    payment_method = data.get("payment_method", "stars")
-    
-    if payment_method == "stars" and PROVIDER_TOKEN:
-        await process_stars_payment(update, context, user.id, product_name, product_price)
-    elif payment_method == "yoomoney" and YOOMONEY_TOKEN:
-        await process_yoomoney_payment(update, context, user.id, product_name, product_price)
-    else:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⭐ Telegram Stars", callback_data=f"payopt_stars_{product_price}")],
-            [InlineKeyboardButton("💳 ЮMoney (карта)", callback_data=f"payopt_yoomoney_{product_price}")]
-        ])
-        context.user_data["pending_product"] = {"name": product_name, "price": product_price}
-        await update.message.reply_text(
-            f"🛍️ <b>{product_name}</b>\n💰 {product_price} руб.\n\nВыберите способ оплаты:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard
-        )
-
-async def payment_option_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    parts = query.data.split("_")
-    method = parts[1]
-    product_price = int(parts[2])
-    
-    product = context.user_data.get("pending_product", {"name": "Товар", "price": product_price})
-    
-    if method == "stars":
-        await process_stars_payment(update, context, query.from_user.id, product["name"], product["price"])
-    elif method == "yoomoney":
-        await process_yoomoney_payment(update, context, query.from_user.id, product["name"], product["price"])
-    
-    await query.message.delete()
+async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
 
 # ========== ЧАТ С АДМИНИСТРАЦИЕЙ ==========
 async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,76 +364,47 @@ async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = user.username or user.full_name
     
     if user_id in active_chats:
-        await update.message.reply_text(
-            "⏳ Вы уже находитесь в чате с администратором.\nИспользуйте /stopchat для завершения.",
-            reply_markup=main_keyboard
-        )
+        await update.message.reply_text("⏳ Вы уже в чате. /stopchat для завершения.", reply_markup=main_keyboard)
         return ConversationHandler.END
     
     admin_kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Принять", callback_data=f"accept_{user_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}")
-        ]
+        [InlineKeyboardButton("✅ Принять", callback_data=f"accept_{user_id}"),
+         InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}")]
     ])
     
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=f"📞 <b>Запрос на связь</b>\n\n👤 @{username} (ID: <code>{user_id}</code>)",
-                reply_markup=admin_kb,
-                parse_mode=ParseMode.HTML
-            )
+            await context.bot.send_message(chat_id=admin_id, text=f"📞 <b>Запрос на связь</b>\n\n👤 @{username} (ID: <code>{user_id}</code>)", reply_markup=admin_kb, parse_mode=ParseMode.HTML)
         except:
             pass
     
-    await update.message.reply_text(
-        "✅ Ваш запрос отправлен.\n⏳ Ожидайте ответа...",
-        reply_markup=main_keyboard
-    )
+    await update.message.reply_text("✅ Запрос отправлен. Ожидайте...", reply_markup=main_keyboard)
     return ConversationHandler.END
 
 async def accept_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     admin_id = query.from_user.id
     if admin_id not in ADMIN_IDS:
         return
-    
     user_id = int(query.data.split("_")[1])
-    
     if user_id in active_chats:
-        await query.edit_message_text("❌ Пользователь уже в чате.")
+        await query.edit_message_text("❌ Уже в чате")
         return
-    
     active_chats[user_id] = admin_id
     active_chats[admin_id] = user_id
-    
-    await query.edit_message_text(
-        f"✅ Вы приняли запрос.\n💬 Сообщения будут пересылаться.\n📌 /stopchat для завершения.",
-        parse_mode=ParseMode.HTML
-    )
-    
+    await query.edit_message_text(f"✅ Вы приняли запрос.\n💬 Сообщения пересылаются.\n/stopchat для завершения.", parse_mode=ParseMode.HTML)
     try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="🎉 <b>Администратор подключился!</b>\n\n💬 Пишите ваш вопрос.\n📌 /stopchat для завершения.",
-            parse_mode=ParseMode.HTML
-        )
+        await context.bot.send_message(chat_id=user_id, text="🎉 <b>Администратор подключился!</b>\n\n💬 Пишите ваш вопрос.\n/stopchat для завершения.", parse_mode=ParseMode.HTML)
     except:
         pass
-    
     return ConversationHandler.END
 
 async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     user_id = int(query.data.split("_")[1])
     await query.edit_message_text(f"❌ Запрос отклонён.", parse_mode=ParseMode.HTML)
-    
     try:
         await context.bot.send_message(chat_id=user_id, text="❌ Администраторы сейчас не могут ответить.")
     except:
@@ -372,40 +412,25 @@ async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
-    
     if sender_id not in active_chats:
         return
-    
     receiver_id = active_chats[sender_id]
-    
-    if sender_id in ADMIN_IDS:
-        prefix = "👨‍💼 Администратор"
-    else:
-        sender_name = update.effective_user.username or update.effective_user.full_name
-        prefix = f"👤 {sender_name}"
-    
+    prefix = "👨‍💼 Администратор" if sender_id in ADMIN_IDS else f"👤 {update.effective_user.username or update.effective_user.full_name}"
     try:
-        await context.bot.send_message(
-            chat_id=receiver_id,
-            text=f"💬 <b>{prefix}:</b>\n{update.message.text}",
-            parse_mode=ParseMode.HTML
-        )
+        await context.bot.send_message(chat_id=receiver_id, text=f"💬 <b>{prefix}:</b>\n{update.message.text}", parse_mode=ParseMode.HTML)
     except:
         pass
+    raise ConversationHandler.END
 
 async def stop_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     if user_id not in active_chats:
         await update.message.reply_text("❌ Вы не в чате.", reply_markup=main_keyboard)
         return
-    
     partner_id = active_chats[user_id]
     del active_chats[user_id]
     del active_chats[partner_id]
-    
     await update.message.reply_text("🔴 Чат завершён.", reply_markup=main_keyboard)
-    
     try:
         await context.bot.send_message(chat_id=partner_id, text="🔴 <b>Чат завершён.</b>", parse_mode=ParseMode.HTML)
     except:
@@ -413,48 +438,33 @@ async def stop_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== КОМАНДЫ ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"👋 Привет, {update.effective_user.full_name}!\n\nЯ бот для связи с командой.\nВыберите действие:",
-        reply_markup=main_keyboard
-    )
+    await update.message.reply_text(f"👋 Привет, {update.effective_user.full_name}!\n\nЯ бот для связи с командой.\nВыберите действие:", reply_markup=main_keyboard)
 
 async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    
     hours = int(context.args[0]) if context.args else 0
     tickets = await get_old_pending_tickets(hours=hours)
-    
     if not tickets:
         await update.message.reply_text(f"✅ Нет заявок, ожидающих более {hours} ч.")
         return
-    
-    text = f"📋 <b>Заявки в ожидании</b>"
-    if hours > 0:
-        text += f" (более {hours} ч.)"
-    text += ":\n\n"
-    
+    text = f"📋 <b>Заявки в ожидании</b>" + (f" (более {hours} ч.)" if hours > 0 else "") + ":\n\n"
     for t in tickets[:15]:
         created = datetime.fromisoformat(t['created_at'])
         hours_ago = int((datetime.now() - created).total_seconds() / 3600)
         emoji = "🟢" if hours_ago < 12 else ("🟡" if hours_ago < 24 else "🔴")
         text += f"{emoji} #{t['id']} ({t['type']}) — {hours_ago} ч. назад\n"
-    
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # ========== НАПОМИНАНИЯ ==========
 async def check_pending_tickets(context: ContextTypes.DEFAULT_TYPE):
     tickets = await get_old_pending_tickets(hours=24)
-    
     if tickets:
-        count = len(tickets)
-        text = f"⚠️ <b>Внимание!</b>\n\n🔴 <b>{count}</b> заявок ожидают более 24 часов:\n\n"
-        
+        text = f"⚠️ <b>Внимание!</b>\n\n🔴 <b>{len(tickets)}</b> заявок ожидают более 24 часов:\n\n"
         for t in tickets[:10]:
             created = datetime.fromisoformat(t['created_at'])
             hours_ago = int((datetime.now() - created).total_seconds() / 3600)
             text += f"• #{t['id']} ({t['type']}) — {hours_ago} ч. назад\n"
-        
         for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.HTML)
@@ -474,130 +484,85 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "без username"
     ticket_num = get_next_ticket_number()
-    message_text = update.message.text
     message_id = update.message.message_id
     
     admin_kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{message_id}_{ticket_num}"),
-            InlineKeyboardButton("❌ Отказать", callback_data=f"reject_{message_id}_{ticket_num}")
-        ]
+        [InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{message_id}_{ticket_num}"),
+         InlineKeyboardButton("❌ Отказать", callback_data=f"reject_{message_id}_{ticket_num}")]
     ])
     
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=f"💡 <b>НОВАЯ ИДЕЯ #{ticket_num}</b>\n\n👤 @{username}\n\n📄 {message_text}",
-                reply_markup=admin_kb,
-                parse_mode=ParseMode.HTML
-            )
+            await context.bot.send_message(chat_id=admin_id, text=f"💡 <b>НОВАЯ ИДЕЯ #{ticket_num}</b>\n\n👤 @{username}\n\n📄 {update.message.text}", reply_markup=admin_kb, parse_mode=ParseMode.HTML)
         except:
             pass
     
-    await save_ticket(user_id, username, message_id, "idea", message_text)
-    await update.message.reply_text(
-        f"✅ Идея отправлена!\n📌 Номер заявки: <b>#{ticket_num}</b>",
-        reply_markup=main_keyboard,
-        parse_mode=ParseMode.HTML
-    )
+    await save_ticket(user_id, username, message_id, "idea", update.message.text)
+    await update.message.reply_text(f"✅ Идея отправлена!\n📌 Номер заявки: <b>#{ticket_num}</b>", reply_markup=main_keyboard, parse_mode=ParseMode.HTML)
     return ConversationHandler.END
 
 async def process_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "без username"
     ticket_num = get_next_ticket_number()
-    message_text = update.message.text
     message_id = update.message.message_id
     
-    admin_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 Ответить", callback_data=f"reply_{message_id}_{ticket_num}")]
-    ])
+    admin_kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Ответить", callback_data=f"reply_{message_id}_{ticket_num}")]])
     
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=f"❓ <b>НОВЫЙ ВОПРОС #{ticket_num}</b>\n\n👤 @{username}\n\n📄 {message_text}",
-                reply_markup=admin_kb,
-                parse_mode=ParseMode.HTML
-            )
+            await context.bot.send_message(chat_id=admin_id, text=f"❓ <b>НОВЫЙ ВОПРОС #{ticket_num}</b>\n\n👤 @{username}\n\n📄 {update.message.text}", reply_markup=admin_kb, parse_mode=ParseMode.HTML)
         except:
             pass
     
-    await save_ticket(user_id, username, message_id, "question", message_text)
-    await update.message.reply_text(
-        f"✅ Вопрос отправлен!\n📌 Номер заявки: <b>#{ticket_num}</b>",
-        reply_markup=main_keyboard,
-        parse_mode=ParseMode.HTML
-    )
+    await save_ticket(user_id, username, message_id, "question", update.message.text)
+    await update.message.reply_text(f"✅ Вопрос отправлен!\n📌 Номер заявки: <b>#{ticket_num}</b>", reply_markup=main_keyboard, parse_mode=ParseMode.HTML)
     return ConversationHandler.END
 
 async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.from_user.id not in ADMIN_IDS:
         return ConversationHandler.END
-    
     parts = query.data.split("_")
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
-    
     context.user_data["reply_to_msg"] = message_id
     context.user_data["ticket_num"] = ticket_num
-    
     await query.message.reply_text(f"✏️ Напишите ответ (заявка #{ticket_num}):")
     return WAITING_REPLY
 
 async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return ConversationHandler.END
-    
     original_msg_id = context.user_data.get("reply_to_msg")
     ticket_num = context.user_data.get("ticket_num", "?")
-    
     if not original_msg_id:
         await update.message.reply_text("❌ Ошибка")
         return ConversationHandler.END
-    
     user_id, _ = await get_user_by_message(original_msg_id)
     admin_name = update.effective_user.username or update.effective_user.full_name
-    
     if user_id:
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"📬 <b>Ответ на вопрос #{ticket_num}</b>\n\n👤 @{admin_name}\n📝 {update.message.text}",
-                parse_mode=ParseMode.HTML
-            )
+            await context.bot.send_message(chat_id=user_id, text=f"📬 <b>Ответ на вопрос #{ticket_num}</b>\n\n👤 @{admin_name}\n📝 {update.message.text}", parse_mode=ParseMode.HTML)
             await update_ticket_status(original_msg_id, "answered")
             await update.message.reply_text(f"✅ Ответ отправлен!")
         except:
             pass
-    
     return ConversationHandler.END
 
 async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.from_user.id not in ADMIN_IDS:
         return
-    
     parts = query.data.split("_")
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
-    
     user_id, _ = await get_user_by_message(message_id)
-    
     if user_id:
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"🎉 <b>Идея #{ticket_num} ОДОБРЕНА!</b>",
-                parse_mode=ParseMode.HTML
-            )
+            await context.bot.send_message(chat_id=user_id, text=f"🎉 <b>Идея #{ticket_num} ОДОБРЕНА!</b>", parse_mode=ParseMode.HTML)
             await update_ticket_status(message_id, "approved")
             await query.edit_message_reply_markup(reply_markup=None)
         except:
@@ -606,23 +571,15 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.from_user.id not in ADMIN_IDS:
         return
-    
     parts = query.data.split("_")
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
-    
     user_id, _ = await get_user_by_message(message_id)
-    
     if user_id:
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"📋 <b>Идея #{ticket_num} отклонена.</b>",
-                parse_mode=ParseMode.HTML
-            )
+            await context.bot.send_message(chat_id=user_id, text=f"📋 <b>Идея #{ticket_num} отклонена.</b>", parse_mode=ParseMode.HTML)
             await update_ticket_status(message_id, "rejected")
             await query.edit_message_reply_markup(reply_markup=None)
         except:
@@ -640,17 +597,23 @@ if __name__ == "__main__":
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Платежи
-    application.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
-    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
-    application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, webapp_data_handler))
-    application.add_handler(CallbackQueryHandler(payment_option_handler, pattern="^payopt_"))
-    application.add_handler(CallbackQueryHandler(check_yoomoney_callback, pattern="^check_yoomoney_"))
-    
     # Команды
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("pending", cmd_pending))
     application.add_handler(CommandHandler("stopchat", stop_chat_command))
+    
+    # Каталог и корзина
+    application.add_handler(MessageHandler(filters.Regex("^🛍️ Каталог$"), show_catalog))
+    application.add_handler(MessageHandler(filters.Regex("^🛒 Корзина$"), show_cart))
+    application.add_handler(CallbackQueryHandler(show_category, pattern="^cat_"))
+    application.add_handler(CallbackQueryHandler(show_product, pattern="^product_"))
+    application.add_handler(CallbackQueryHandler(add_to_cart, pattern="^addtocart_"))
+    application.add_handler(CallbackQueryHandler(cart_update, pattern="^cart_(inc|dec|rem)_"))
+    application.add_handler(CallbackQueryHandler(cart_clear, pattern="^cart_clear$"))
+    application.add_handler(CallbackQueryHandler(checkout, pattern="^checkout$"))
+    application.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^paid_"))
+    application.add_handler(CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$"))
+    application.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
     
     # Чат
     application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
@@ -673,7 +636,6 @@ if __name__ == "__main__":
         states={WAITING_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_reply)]},
         fallbacks=[CommandHandler("cancel", cancel)]
     )
-    
     application.add_handler(idea_conv)
     application.add_handler(question_conv)
     application.add_handler(reply_conv)
@@ -682,9 +644,8 @@ if __name__ == "__main__":
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_message))
     
     # Напоминания
-    job_queue = application.job_queue
-    if job_queue:
-        job_queue.run_repeating(check_pending_tickets, interval=3600, first=10)
+    if application.job_queue:
+        application.job_queue.run_repeating(check_pending_tickets, interval=3600, first=10)
     
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен с каталогом, корзиной и оплатой!")
     application.run_polling()
