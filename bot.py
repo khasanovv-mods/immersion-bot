@@ -607,18 +607,19 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("pending", cmd_pending))
     application.add_handler(CommandHandler("stopchat", stop_chat_command))
     
-    # Каталог и корзина
-    application.add_handler(MessageHandler(filters.Regex("^🛍️ Каталог$"), show_catalog))
-    application.add_handler(MessageHandler(filters.Regex("^🛒 Корзина$"), show_cart))
-    application.add_handler(CallbackQueryHandler(show_category, pattern="^cat_"))
-    application.add_handler(CallbackQueryHandler(show_product, pattern="^product_"))
+    # КАТАЛОГ И КОРЗИНА — ПЕРВЫМИ!
     application.add_handler(CallbackQueryHandler(add_to_cart, pattern="^addtocart_"))
     application.add_handler(CallbackQueryHandler(cart_update, pattern="^cart_(inc|dec|rem)_"))
     application.add_handler(CallbackQueryHandler(cart_clear, pattern="^cart_clear$"))
     application.add_handler(CallbackQueryHandler(checkout, pattern="^checkout$"))
     application.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^paid_"))
+    application.add_handler(CallbackQueryHandler(show_category, pattern="^cat_"))
+    application.add_handler(CallbackQueryHandler(show_product, pattern="^product_"))
     application.add_handler(CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$"))
     application.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
+    
+    application.add_handler(MessageHandler(filters.Regex("^🛍️ Каталог$"), show_catalog))
+    application.add_handler(MessageHandler(filters.Regex("^🛒 Корзина$"), show_cart))
     
     # Чат
     application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
@@ -646,11 +647,9 @@ if __name__ == "__main__":
     application.add_handler(reply_conv)
     application.add_handler(CallbackQueryHandler(approve_button, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(reject_button, pattern="^reject_"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_message))
     
-    # Напоминания
-    if application.job_queue:
-        application.job_queue.run_repeating(check_pending_tickets, interval=3600, first=10)
+    # Чат-сообщения — ПОСЛЕДНИМ
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_message))
     
     print("✅ Бот запущен с каталогом, корзиной и оплатой!")
     application.run_polling()
