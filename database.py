@@ -3,9 +3,10 @@ from datetime import datetime, timedelta
 
 DB_NAME = "bot_database.db"
 
-# Создаем таблицу при первом запуске
+# ========== ИНИЦИАЛИЗАЦИЯ БАЗЫ ==========
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
+        # Таблица заявок
         await db.execute('''
             CREATE TABLE IF NOT EXISTS tickets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,9 +19,25 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Таблица заказов
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                order_id TEXT UNIQUE NOT NULL,
+                product_name TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                payment_method TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         await db.commit()
 
-# Сохранить заявку в базу
+# ========== ЗАЯВКИ ==========
 async def save_ticket(user_id, username, message_id, ticket_type, content):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -29,7 +46,6 @@ async def save_ticket(user_id, username, message_id, ticket_type, content):
         )
         await db.commit()
 
-# Обновить статус заявки
 async def update_ticket_status(message_id, status):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -38,7 +54,6 @@ async def update_ticket_status(message_id, status):
         )
         await db.commit()
 
-# Получить ID пользователя по message_id
 async def get_user_by_message(message_id):
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
@@ -48,7 +63,6 @@ async def get_user_by_message(message_id):
         row = await cursor.fetchone()
         return row if row else (None, None)
 
-# Получить статус заявки по message_id
 async def get_ticket_status(message_id):
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
@@ -58,9 +72,33 @@ async def get_ticket_status(message_id):
         row = await cursor.fetchone()
         return row[0] if row else None
 
-# Получить заявки в статусе pending, созданные более hours часов назад
+# ========== СТАТИСТИКА И НАПОМИНАНИЯ ==========
+async def get_stats():
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM tickets")
+        total = (await cursor.fetchone())[0]
+        
+        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'pending'")
+        pending = (await cursor.fetchone())[0]
+        
+        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'approved'")
+        approved = (await cursor.fetchone())[0]
+        
+        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'rejected'")
+        rejected = (await cursor.fetchone())[0]
+        
+        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'answered'")
+        answered = (await cursor.fetchone())[0]
+        
+        return {
+            'total': total,
+            'pending': pending,
+            'approved': approved,
+            'rejected': rejected,
+            'answered': answered
+        }
+
 async def get_old_pending_tickets(hours=24):
-    """Возвращает список заявок в статусе 'pending', которые висят более hours часов"""
     async with aiosqlite.connect(DB_NAME) as db:
         cutoff_time = (datetime.now() - timedelta(hours=hours)).isoformat()
         
@@ -86,38 +124,39 @@ async def get_old_pending_tickets(hours=24):
             })
         return tickets
 
-# Получить статистику по заявкам
-async def get_stats():
+# ========== ЗАКАЗЫ ==========
+async def save_order(user_id, username, order_id, product_name, amount, currency, payment_method):
     async with aiosqlite.connect(DB_NAME) as db:
-        # Всего заявок
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets")
-        total = (await cursor.fetchone())[0]
-        
-        # В ожидании
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'pending'")
-        pending = (await cursor.fetchone())[0]
-        
-        # Одобрено
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'approved'")
-        approved = (await cursor.fetchone())[0]
-        
-        # Отклонено
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'rejected'")
-        rejected = (await cursor.fetchone())[0]
-        
-        # Отвечено
-        cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'answered'")
-        answered = (await cursor.fetchone())[0]
-        
-        return {
-            'total': total,
-            'pending': pending,
-            'approved': approved,
-            'rejected': rejected,
-            'answered': answered
-        }
+        await db.execute(
+            "INSERT INTO orders (user_id, username, order_id, product_name, amount, currency, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, username, order_id, product_name, amount, currency, payment_method)
+        )
+        await db.commit()
 
-# Получить все заявки (с фильтром по статусу)
+async def get_orders_by_user(user_id):
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        )
+        rows = await cursor.fetchall()
+        orders = []
+        for row in rows:
+            orders.append({
+                'id': row[0],
+                'user_id': row[1],
+                'username': row[2],
+                'order_id': row[3],
+                'product_name': row[4],
+                'amount': row[5],
+                'currency': row[6],
+                'payment_method': row[7],
+                'status': row[8],
+                'created_at': row[9]
+            })
+        return orders
+
+# ========== ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ==========
 async def get_all_tickets(status_filter=None):
     async with aiosqlite.connect(DB_NAME) as db:
         if status_filter and status_filter != 'all':
@@ -126,9 +165,7 @@ async def get_all_tickets(status_filter=None):
                 (status_filter,)
             )
         else:
-            cursor = await db.execute(
-                "SELECT * FROM tickets ORDER BY created_at DESC"
-            )
+            cursor = await db.execute("SELECT * FROM tickets ORDER BY created_at DESC")
         
         rows = await cursor.fetchall()
         tickets = []
@@ -145,7 +182,6 @@ async def get_all_tickets(status_filter=None):
             })
         return tickets
 
-# Получить заявку по ID
 async def get_ticket_by_id(ticket_id):
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
@@ -166,7 +202,6 @@ async def get_ticket_by_id(ticket_id):
             }
         return None
 
-# Обновить статус заявки по ID
 async def update_ticket_status_by_id(ticket_id, status):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -175,7 +210,6 @@ async def update_ticket_status_by_id(ticket_id, status):
         )
         await db.commit()
 
-# Поиск заявок по ключевому слову
 async def search_tickets(query):
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
@@ -199,35 +233,3 @@ async def search_tickets(query):
                 'created_at': row[4]
             })
         return tickets
-
-async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        # Таблица заявок
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS tickets (...)
-        ''')
-        
-        # Таблица заказов
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                username TEXT,
-                order_id TEXT UNIQUE NOT NULL,
-                product_name TEXT NOT NULL,
-                amount INTEGER NOT NULL,
-                currency TEXT NOT NULL,
-                payment_method TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        await db.commit()
-
-async def save_order(user_id, username, order_id, product_name, amount, currency, payment_method):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "INSERT INTO orders (user_id, username, order_id, product_name, amount, currency, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, username, order_id, product_name, amount, currency, payment_method)
-        )
-        await db.commit()
