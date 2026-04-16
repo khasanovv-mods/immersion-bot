@@ -85,6 +85,7 @@ main_keyboard = ReplyKeyboardMarkup(
 
 # ========== КАТАЛОГ ==========
 async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"📂 Пользователь {update.effective_user.id} открыл каталог")
     keyboard = []
     for cat_id, cat_data in CATALOG.items():
         keyboard.append([InlineKeyboardButton(cat_data["name"], callback_data=f"cat_{cat_id}")])
@@ -100,6 +101,8 @@ async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     cat_id = query.data.split("_")[1]
+    logger.info(f"📂 Пользователь {query.from_user.id} выбрал категорию: {cat_id}")
+    
     cat_data = CATALOG.get(cat_id)
     if not cat_data:
         return
@@ -124,12 +127,17 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     parts = query.data.split("_")
     cat_id, prod_id = parts[1], parts[2]
+    logger.info(f"📦 Пользователь {query.from_user.id} смотрит товар: {cat_id}_{prod_id}")
+    
     product = CATALOG.get(cat_id, {}).get("products", {}).get(prod_id)
     if not product:
         return
     
+    callback_data = f"addtocart_{cat_id}_{prod_id}"
+    logger.info(f"🔍 Кнопка 'Добавить в корзину' создана с callback_data: {callback_data}")
+    
     keyboard = [
-        [InlineKeyboardButton("➕ Добавить в корзину", callback_data=f"addtocart_{cat_id}_{prod_id}")],
+        [InlineKeyboardButton("➕ Добавить в корзину", callback_data=callback_data)],
         [InlineKeyboardButton("« Назад к товарам", callback_data=f"cat_{cat_id}")]
     ]
     
@@ -147,8 +155,11 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("_")
     cat_id, prod_id = parts[1], parts[2]
     
+    logger.info(f"🛒 Пользователь {user_id} добавляет товар: {cat_id}_{prod_id}")
+    
     product = CATALOG.get(cat_id, {}).get("products", {}).get(prod_id)
     if not product:
+        logger.error(f"❌ Товар {cat_id}_{prod_id} не найден")
         await query.answer("❌ Товар не найден", show_alert=True)
         return
     
@@ -158,19 +169,21 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cart_key = f"{cat_id}_{prod_id}"
     if cart_key in user_carts[user_id]:
         user_carts[user_id][cart_key]["quantity"] += 1
+        logger.info(f"📈 Количество увеличено: {user_carts[user_id][cart_key]['quantity']}")
     else:
         user_carts[user_id][cart_key] = {
             "name": product["name"],
             "price": product["price"],
             "quantity": 1
         }
+        logger.info(f"🆕 Новый товар добавлен в корзину")
     
     await query.answer(f"✅ {product['name']} добавлен в корзину!", show_alert=True)
-    logger.info(f"Товар {product['name']} добавлен в корзину пользователя {user_id}")
 
 # ========== КОРЗИНА ==========
 async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    logger.info(f"🛒 Пользователь {user_id} открыл корзину")
     await show_cart_internal(update, user_id)
 
 async def show_cart_internal(update, user_id):
