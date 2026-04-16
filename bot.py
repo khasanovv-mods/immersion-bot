@@ -104,9 +104,11 @@ async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     for prod_id, prod in cat_data["products"].items():
+        callback = f"buy_{cat_id}_{prod_id}"
+        logger.info(f"🔘 Создана кнопка: {prod['name']} -> {callback}")
         keyboard.append([InlineKeyboardButton(
             f"{prod['name']} — {prod['price']} ₽",
-            callback_data=f"buy_{cat_id}_{prod_id}"
+            callback_data=callback
         )])
     keyboard.append([InlineKeyboardButton("« Назад к категориям", callback_data="back_to_catalog")])
     
@@ -117,7 +119,6 @@ async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Прямая покупка товара — создаёт ссылку на оплату"""
     query = update.callback_query
     await query.answer()
     
@@ -125,16 +126,16 @@ async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("_")
     cat_id, prod_id = parts[1], parts[2]
     
+    logger.info(f"🛒 Пользователь {user_id} нажал 'Купить': {cat_id}_{prod_id}")
+    
     product = CATALOG.get(cat_id, {}).get("products", {}).get(prod_id)
     if not product:
         await query.answer("❌ Товар не найден", show_alert=True)
         return
     
-    # Создаём заказ
     order_id = f"order_{user_id}_{uuid.uuid4().hex[:8]}"
     payment_link = generate_yoomoney_link(product["price"], product["name"], order_id)
     
-    # Сохраняем информацию о платеже
     pending_payments[order_id] = {
         "user_id": user_id,
         "product_name": product["name"],
@@ -224,7 +225,6 @@ async def check_yoomoney_payment(label: str) -> bool:
     except:
         return False
 
-# ========== НАВИГАЦИЯ ==========
 async def back_to_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -476,7 +476,7 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("pending", cmd_pending))
     application.add_handler(CommandHandler("stopchat", stop_chat_command))
     
-    # КАТАЛОГ — ПРЯМАЯ ПОКУПКА
+    # КАТАЛОГ — ВАЖНО: обработчик buy_ ДОЛЖЕН БЫТЬ ПЕРВЫМ
     application.add_handler(CallbackQueryHandler(buy_product, pattern="^buy_"))
     application.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^paid_"))
     application.add_handler(CallbackQueryHandler(show_category, pattern="^cat_"))
