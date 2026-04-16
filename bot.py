@@ -28,8 +28,7 @@ YOOMONEY_RECEIVER = os.getenv("YOOMONEY_RECEIVER", "")  # Номер кошел�
 # URL для WebApp
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://your-webapp-url.com")
 
-# Импорт базы данных
-from database import init_db, save_ticket, update_ticket_status, get_user_by_message, get_ticket_status, get_old_pending_tickets, save_order, update_order_status, get_pending_payments
+from database import init_db, save_ticket, update_ticket_status, get_user_by_message, get_ticket_status, get_old_pending_tickets, save_order
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
