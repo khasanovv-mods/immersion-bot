@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import uuid
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, ContextTypes
@@ -18,12 +17,8 @@ if not BOT_TOKEN:
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()] if ADMIN_IDS_STR else []
 
-# Настройки ЮMoney
-YOOMONEY_TOKEN = os.getenv("YOOMONEY_TOKEN", "")
-YOOMONEY_RECEIVER = os.getenv("YOOMONEY_RECEIVER", "")
-
 # ========== ИМПОРТ БАЗЫ ДАННЫХ ==========
-from database import init_db, save_ticket, update_ticket_status, get_user_by_message, get_ticket_status, get_old_pending_tickets, save_order
+from database import init_db, save_ticket, update_ticket_status, get_user_by_message, get_ticket_status, get_old_pending_tickets
 
 # ========== ЛОГИРОВАНИЕ ==========
 logging.basicConfig(
@@ -36,7 +31,6 @@ WAITING_IDEA, WAITING_QUESTION, WAITING_REPLY = range(3)
 
 # Активные чаты
 active_chats = {}
-pending_payments = {}
 
 ticket_counter = 0
 
@@ -45,191 +39,77 @@ def get_next_ticket_number():
     ticket_counter += 1
     return ticket_counter
 
-# ========== КАТАЛОГ ТОВАРОВ ==========
-CATALOG = {
-    "futbolki": {
-        "name": "👕 Футболки",
-        "products": {
-            "fut_1": {"name": "Футболка «Классика»", "desc": "Хлопок 100%, размеры S-XXL", "price": 1500},
-            "fut_2": {"name": "Футболка «Премиум»", "desc": "Органический хлопок", "price": 2200},
-        }
-    },
-    "hoodie": {
-        "name": "🧥 Худи",
-        "products": {
-            "hoodie_1": {"name": "Худи «Базовое»", "desc": "Флис, капюшон", "price": 3500},
-            "hoodie_2": {"name": "Худи «Оверсайз»", "desc": "Свободный крой", "price": 3900},
-        }
-    },
-    "caps": {
-        "name": "🧢 Кепки",
-        "products": {
-            "cap_1": {"name": "Кепка «Снэпбэк»", "desc": "Регулируемый размер", "price": 1200},
-            "cap_2": {"name": "Кепка «Бейсболка»", "desc": "Классическая", "price": 900},
-        }
-    }
-}
+# ========== ПРАЙС-ЛИСТ ==========
+PRICE_LIST_IMAGE = "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=800&h=400&fit=crop"  # Замените на свою картинку
+
+PRICE_LIST_TEXT = """
+💰 <b>ПРАЙС-ЛИСТ</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+
+👕 <b>ФУТБОЛКИ</b>
+• «Классика» (хлопок 100%) — <b>1 500 ₽</b>
+• «Премиум» (орг. хлопок) — <b>2 200 ₽</b>
+
+🧥 <b>ХУДИ</b>
+• «Базовое» (флис) — <b>3 500 ₽</b>
+• «Оверсайз» — <b>3 900 ₽</b>
+
+🧢 <b>КЕПКИ</b>
+• «Снэпбэк» — <b>1 200 ₽</b>
+• «Бейсболка» — <b>900 ₽</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+
+📦 <b>ДОСТАВКА</b>
+• По России (СДЭК) — <b>от 350 ₽</b>
+• Самовывоз — <b>бесплатно</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+
+📞 <b>КАК ЗАКАЗАТЬ?</b>
+Нажмите кнопку «📞 Связь с администрацией» и напишите, что хотите заказать. Мы ответим в ближайшее время!
+
+💳 <b>ОПЛАТА</b>
+• Перевод на карту
+• ЮMoney
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<i>Цены актуальны на апрель 2026 г.</i>
+"""
 
 # ========== КЛАВИАТУРА ==========
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="💡 Отправить идею")],
         [KeyboardButton(text="❓ Задать вопрос")],
-        [KeyboardButton(text="🛍️ Каталог")],
+        [KeyboardButton(text="💰 Прайс-лист")],
         [KeyboardButton(text="📞 Связь с администрацией")]
     ],
     resize_keyboard=True
 )
 
-# ========== КАТАЛОГ ==========
-async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = []
-    for cat_id, cat_data in CATALOG.items():
-        keyboard.append([InlineKeyboardButton(cat_data["name"], callback_data=f"cat_{cat_id}")])
-    
-    await update.message.reply_text(
-        "🛍️ <b>Каталог товаров</b>\n\nВыберите категорию:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.HTML
-    )
-
-async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    cat_id = query.data.split("_")[1]
-    cat_data = CATALOG.get(cat_id)
-    if not cat_data:
-        return
-    
-    keyboard = []
-    for prod_id, prod in cat_data["products"].items():
-        callback = f"buy_{cat_id}_{prod_id}"
-        logger.info(f"🔘 Создана кнопка: {prod['name']} -> {callback}")
-        keyboard.append([InlineKeyboardButton(
-            f"{prod['name']} — {prod['price']} ₽",
-            callback_data=callback
-        )])
-    keyboard.append([InlineKeyboardButton("« Назад к категориям", callback_data="back_to_catalog")])
-    
-    await query.edit_message_text(
-        f"🛍️ <b>{cat_data['name']}</b>\n\nВыберите товар:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.HTML
-    )
-
-async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    parts = query.data.split("_")
-    cat_id, prod_id = parts[1], parts[2]
-    
-    logger.info(f"🛒 Пользователь {user_id} нажал 'Купить': {cat_id}_{prod_id}")
-    
-    product = CATALOG.get(cat_id, {}).get("products", {}).get(prod_id)
-    if not product:
-        await query.answer("❌ Товар не найден", show_alert=True)
-        return
-    
-    order_id = f"order_{user_id}_{uuid.uuid4().hex[:8]}"
-    payment_link = generate_yoomoney_link(product["price"], product["name"], order_id)
-    
-    pending_payments[order_id] = {
-        "user_id": user_id,
-        "product_name": product["name"],
-        "price": product["price"],
-        "created_at": datetime.now()
-    }
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Перейти к оплате", url=payment_link)],
-        [InlineKeyboardButton("✅ Я оплатил", callback_data=f"paid_{order_id}")]
-    ])
-    
-    await query.edit_message_text(
-        f"🛍️ <b>{product['name']}</b>\n\n"
-        f"📝 {product['desc']}\n"
-        f"💰 Цена: <b>{product['price']} ₽</b>\n\n"
-        f"Нажмите кнопку ниже для оплаты через ЮMoney.",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
-
-def generate_yoomoney_link(amount: int, description: str, label: str) -> str:
-    base_url = "https://yoomoney.ru/quickpay/confirm"
-    params = {
-        "receiver": YOOMONEY_RECEIVER,
-        "quickpay-form": "shop",
-        "targets": description[:100],
-        "paymentType": "AC",
-        "sum": amount,
-        "label": label
-    }
-    return f"{base_url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
-
-async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    order_id = query.data.split("_")[1]
-    payment_info = pending_payments.get(order_id)
-    
-    if not payment_info:
-        await query.edit_message_text("❌ Заказ не найден.")
-        return
-    
-    is_paid = await check_yoomoney_payment(order_id)
-    
-    if is_paid:
-        user_id = payment_info["user_id"]
-        product_name = payment_info["product_name"]
-        price = payment_info["price"]
-        
-        await save_order(user_id, query.from_user.username or query.from_user.full_name, order_id, product_name, price, "RUB", "yoomoney")
-        
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"🛒 <b>Новый заказ!</b>\n\n👤 @{query.from_user.username}\n🛍️ {product_name}\n💰 {price} ₽",
-                    parse_mode=ParseMode.HTML
-                )
-            except:
-                pass
-        
-        await query.edit_message_text("✅ <b>Оплата подтверждена!</b>\n\nСпасибо за заказ! Администратор свяжется с вами.", parse_mode=ParseMode.HTML)
-        del pending_payments[order_id]
-    else:
-        await query.edit_message_text(
-            "⏳ <b>Оплата ещё не поступила</b>\n\nПопробуйте позже.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Проверить снова", callback_data=f"paid_{order_id}")]])
-        )
-
-async def check_yoomoney_payment(label: str) -> bool:
-    if not YOOMONEY_TOKEN:
-        return False
+# ========== ПРАЙС-ЛИСТ ==========
+async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет прайс-лист с картинкой"""
     try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": f"Bearer {YOOMONEY_TOKEN}"}
-            async with session.post("https://yoomoney.ru/api/operation-history", headers=headers, data={"label": label, "records": 10}) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    for op in result.get("operations", []):
-                        if op.get("label") == label and op.get("status") == "success":
-                            return True
-        return False
-    except:
-        return False
-
-async def back_to_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"cat_{cat_id}")] for cat_id, cat in CATALOG.items()]
-    await query.edit_message_text("🛍️ <b>Каталог товаров</b>\n\nВыберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        await update.message.reply_photo(
+            photo=PRICE_LIST_IMAGE,
+            caption=PRICE_LIST_TEXT,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard
+        )
+        logger.info(f"📋 Прайс-лист отправлен пользователю {update.effective_user.id}")
+    except Exception as e:
+        # Если картинка не загрузилась — отправляем только текст
+        logger.error(f"Ошибка отправки фото: {e}")
+        await update.message.reply_text(
+            PRICE_LIST_TEXT,
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_keyboard,
+            disable_web_page_preview=True
+        )
 
 # ========== ЧАТ С АДМИНИСТРАЦИЕЙ ==========
 async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -476,13 +356,8 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("pending", cmd_pending))
     application.add_handler(CommandHandler("stopchat", stop_chat_command))
     
-    # КАТАЛОГ — ВАЖНО: обработчик buy_ ДОЛЖЕН БЫТЬ ПЕРВЫМ
-    application.add_handler(CallbackQueryHandler(buy_product, pattern="^buy_"))
-    application.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^paid_"))
-    application.add_handler(CallbackQueryHandler(show_category, pattern="^cat_"))
-    application.add_handler(CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$"))
-    
-    application.add_handler(MessageHandler(filters.Regex("^🛍️ Каталог$"), show_catalog))
+    # Прайс-лист
+    application.add_handler(MessageHandler(filters.Regex("^💰 Прайс-лист$"), show_price_list))
     
     # Чат
     application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
@@ -518,5 +393,5 @@ if __name__ == "__main__":
     if application.job_queue:
         application.job_queue.run_repeating(check_pending_tickets, interval=3600, first=10)
     
-    print("✅ Бот запущен с каталогом и прямой оплатой!")
+    print("✅ Бот запущен с прайс-листом!")
     application.run_polling()
