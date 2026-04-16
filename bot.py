@@ -34,9 +34,8 @@ logger = logging.getLogger(__name__)
 # ========== СОСТОЯНИЯ ==========
 WAITING_IDEA, WAITING_QUESTION, WAITING_REPLY = range(3)
 
-# Активные чаты и корзины
+# Активные чаты
 active_chats = {}
-user_carts = {}
 pending_payments = {}
 
 ticket_counter = 0
@@ -77,7 +76,6 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="💡 Отправить идею")],
         [KeyboardButton(text="❓ Задать вопрос")],
         [KeyboardButton(text="🛍️ Каталог")],
-        [KeyboardButton(text="🛒 Корзина")],
         [KeyboardButton(text="📞 Связь с администрацией")]
     ],
     resize_keyboard=True
@@ -85,7 +83,6 @@ main_keyboard = ReplyKeyboardMarkup(
 
 # ========== КАТАЛОГ ==========
 async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"📂 Пользователь {update.effective_user.id} открыл каталог")
     keyboard = []
     for cat_id, cat_data in CATALOG.items():
         keyboard.append([InlineKeyboardButton(cat_data["name"], callback_data=f"cat_{cat_id}")])
@@ -101,8 +98,6 @@ async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     cat_id = query.data.split("_")[1]
-    logger.info(f"📂 Пользователь {query.from_user.id} выбрал категорию: {cat_id}")
-    
     cat_data = CATALOG.get(cat_id)
     if not cat_data:
         return
@@ -111,7 +106,7 @@ async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for prod_id, prod in cat_data["products"].items():
         keyboard.append([InlineKeyboardButton(
             f"{prod['name']} — {prod['price']} ₽",
-            callback_data=f"product_{cat_id}_{prod_id}"
+            callback_data=f"buy_{cat_id}_{prod_id}"
         )])
     keyboard.append([InlineKeyboardButton("« Назад к категориям", callback_data="back_to_catalog")])
     
@@ -121,33 +116,8 @@ async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
-async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    parts = query.data.split("_")
-    cat_id, prod_id = parts[1], parts[2]
-    logger.info(f"📦 Пользователь {query.from_user.id} смотрит товар: {cat_id}_{prod_id}")
-    
-    product = CATALOG.get(cat_id, {}).get("products", {}).get(prod_id)
-    if not product:
-        return
-    
-    callback_data = f"addtocart_{cat_id}_{prod_id}"
-    logger.info(f"🔍 Кнопка 'Добавить в корзину' создана с callback_data: {callback_data}")
-    
-    keyboard = [
-        [InlineKeyboardButton("➕ Добавить в корзину", callback_data=callback_data)],
-        [InlineKeyboardButton("« Назад к товарам", callback_data=f"cat_{cat_id}")]
-    ]
-    
-    await query.edit_message_text(
-        f"🛍️ <b>{product['name']}</b>\n\n📝 {product['desc']}\n💰 Цена: <b>{product['price']} ₽</b>",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.HTML
-    )
-
-async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Прямая покупка товара — создаёт ссылку на оплату"""
     query = update.callback_query
     await query.answer()
     
@@ -155,130 +125,20 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("_")
     cat_id, prod_id = parts[1], parts[2]
     
-    logger.info(f"🛒 Пользователь {user_id} добавляет товар: {cat_id}_{prod_id}")
-    
     product = CATALOG.get(cat_id, {}).get("products", {}).get(prod_id)
     if not product:
-        logger.error(f"❌ Товар {cat_id}_{prod_id} не найден")
         await query.answer("❌ Товар не найден", show_alert=True)
         return
     
-    if user_id not in user_carts:
-        user_carts[user_id] = {}
-    
-    cart_key = f"{cat_id}_{prod_id}"
-    if cart_key in user_carts[user_id]:
-        user_carts[user_id][cart_key]["quantity"] += 1
-        logger.info(f"📈 Количество увеличено: {user_carts[user_id][cart_key]['quantity']}")
-    else:
-        user_carts[user_id][cart_key] = {
-            "name": product["name"],
-            "price": product["price"],
-            "quantity": 1
-        }
-        logger.info(f"🆕 Новый товар добавлен в корзину")
-    
-    await query.answer(f"✅ {product['name']} добавлен в корзину!", show_alert=True)
-
-# ========== КОРЗИНА ==========
-async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"🛒 Пользователь {user_id} открыл корзину")
-    await show_cart_internal(update, user_id)
-
-async def show_cart_internal(update, user_id):
-    cart = user_carts.get(user_id, {})
-    
-    if not cart:
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛍️ Перейти в каталог", callback_data="back_to_catalog")]])
-        if isinstance(update, Update):
-            await update.message.reply_text("🛒 Ваша корзина пуста.", reply_markup=keyboard)
-        else:
-            await update.edit_message_text("🛒 Ваша корзина пуста.", reply_markup=keyboard)
-        return
-    
-    text = "🛒 <b>Ваша корзина</b>\n\n"
-    total = 0
-    keyboard = []
-    
-    for cart_key, item in cart.items():
-        item_total = item["price"] * item["quantity"]
-        total += item_total
-        text += f"• {item['name']} x{item['quantity']} — {item_total} ₽\n"
-        keyboard.append([
-            InlineKeyboardButton("➖", callback_data=f"cart_dec_{cart_key}"),
-            InlineKeyboardButton(f"{item['quantity']}", callback_data="noop"),
-            InlineKeyboardButton("➕", callback_data=f"cart_inc_{cart_key}"),
-            InlineKeyboardButton("❌", callback_data=f"cart_rem_{cart_key}")
-        ])
-    
-    text += f"\n💰 <b>Итого: {total} ₽</b>"
-    keyboard.append([InlineKeyboardButton("💳 Оформить заказ", callback_data="checkout")])
-    keyboard.append([InlineKeyboardButton("🗑️ Очистить корзину", callback_data="cart_clear")])
-    keyboard.append([InlineKeyboardButton("« Назад в каталог", callback_data="back_to_catalog")])
-    
-    if isinstance(update, Update):
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-    else:
-        await update.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-
-async def cart_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    parts = query.data.split("_")
-    action, cart_key = parts[1], parts[2]
-    
-    if user_id not in user_carts or cart_key not in user_carts[user_id]:
-        await query.edit_message_text("❌ Товар не найден")
-        return
-    
-    if action == "inc":
-        user_carts[user_id][cart_key]["quantity"] += 1
-    elif action == "dec":
-        user_carts[user_id][cart_key]["quantity"] -= 1
-        if user_carts[user_id][cart_key]["quantity"] <= 0:
-            del user_carts[user_id][cart_key]
-    elif action == "rem":
-        del user_carts[user_id][cart_key]
-    
-    await show_cart_internal(query, user_id)
-
-async def cart_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if user_id in user_carts:
-        user_carts[user_id] = {}
-    
-    await query.edit_message_text(
-        "🗑️ Корзина очищена.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛍️ Перейти в каталог", callback_data="back_to_catalog")]])
-    )
-
-# ========== ОФОРМЛЕНИЕ ЗАКАЗА ==========
-async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    cart = user_carts.get(user_id, {})
-    
-    if not cart:
-        await query.edit_message_text("❌ Корзина пуста")
-        return
-    
-    total = sum(item["price"] * item["quantity"] for item in cart.values())
-    items_text = "\n".join([f"• {item['name']} x{item['quantity']}" for item in cart.values()])
+    # Создаём заказ
     order_id = f"order_{user_id}_{uuid.uuid4().hex[:8]}"
-    payment_link = generate_yoomoney_link(total, f"Заказ {order_id}", order_id)
+    payment_link = generate_yoomoney_link(product["price"], product["name"], order_id)
     
+    # Сохраняем информацию о платеже
     pending_payments[order_id] = {
         "user_id": user_id,
-        "cart": {k: v.copy() for k, v in cart.items()},
-        "total": total,
+        "product_name": product["name"],
+        "price": product["price"],
         "created_at": datetime.now()
     }
     
@@ -288,7 +148,10 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     await query.edit_message_text(
-        f"🛒 <b>Оформление заказа</b>\n\n{items_text}\n\n💰 <b>Итого к оплате: {total} ₽</b>\n\nНажмите кнопку ниже для оплаты.",
+        f"🛍️ <b>{product['name']}</b>\n\n"
+        f"📝 {product['desc']}\n"
+        f"💰 Цена: <b>{product['price']} ₽</b>\n\n"
+        f"Нажмите кнопку ниже для оплаты через ЮMoney.",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
@@ -320,26 +183,22 @@ async def check_payment_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     if is_paid:
         user_id = payment_info["user_id"]
-        cart = payment_info["cart"]
-        total = payment_info["total"]
+        product_name = payment_info["product_name"]
+        price = payment_info["price"]
         
-        items_text = ", ".join([f"{item['name']} x{item['quantity']}" for item in cart.values()])
-        await save_order(user_id, query.from_user.username or query.from_user.full_name, order_id, items_text[:100], total, "RUB", "yoomoney")
-        
-        if user_id in user_carts:
-            user_carts[user_id] = {}
+        await save_order(user_id, query.from_user.username or query.from_user.full_name, order_id, product_name, price, "RUB", "yoomoney")
         
         for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"🛒 <b>Новый заказ!</b>\n\n👤 @{query.from_user.username}\n🆔 {order_id}\n💰 {total} ₽\n📦 {items_text}",
+                    text=f"🛒 <b>Новый заказ!</b>\n\n👤 @{query.from_user.username}\n🛍️ {product_name}\n💰 {price} ₽",
                     parse_mode=ParseMode.HTML
                 )
             except:
                 pass
         
-        await query.edit_message_text("✅ <b>Оплата подтверждена!</b>\n\nСпасибо за заказ!", parse_mode=ParseMode.HTML)
+        await query.edit_message_text("✅ <b>Оплата подтверждена!</b>\n\nСпасибо за заказ! Администратор свяжется с вами.", parse_mode=ParseMode.HTML)
         del pending_payments[order_id]
     else:
         await query.edit_message_text(
@@ -371,9 +230,6 @@ async def back_to_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"cat_{cat_id}")] for cat_id, cat in CATALOG.items()]
     await query.edit_message_text("🛍️ <b>Каталог товаров</b>\n\nВыберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
-
-async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
 
 # ========== ЧАТ С АДМИНИСТРАЦИЕЙ ==========
 async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -620,19 +476,13 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("pending", cmd_pending))
     application.add_handler(CommandHandler("stopchat", stop_chat_command))
     
-    # КАТАЛОГ И КОРЗИНА — ПЕРВЫМИ!
-    application.add_handler(CallbackQueryHandler(add_to_cart, pattern="^addtocart_"))
-    application.add_handler(CallbackQueryHandler(cart_update, pattern="^cart_(inc|dec|rem)_"))
-    application.add_handler(CallbackQueryHandler(cart_clear, pattern="^cart_clear$"))
-    application.add_handler(CallbackQueryHandler(checkout, pattern="^checkout$"))
+    # КАТАЛОГ — ПРЯМАЯ ПОКУПКА
+    application.add_handler(CallbackQueryHandler(buy_product, pattern="^buy_"))
     application.add_handler(CallbackQueryHandler(check_payment_callback, pattern="^paid_"))
     application.add_handler(CallbackQueryHandler(show_category, pattern="^cat_"))
-    application.add_handler(CallbackQueryHandler(show_product, pattern="^product_"))
     application.add_handler(CallbackQueryHandler(back_to_catalog, pattern="^back_to_catalog$"))
-    application.add_handler(CallbackQueryHandler(noop, pattern="^noop$"))
     
     application.add_handler(MessageHandler(filters.Regex("^🛍️ Каталог$"), show_catalog))
-    application.add_handler(MessageHandler(filters.Regex("^🛒 Корзина$"), show_cart))
     
     # Чат
     application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
@@ -661,8 +511,12 @@ if __name__ == "__main__":
     application.add_handler(CallbackQueryHandler(approve_button, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(reject_button, pattern="^reject_"))
     
-    # Чат-сообщения — ПОСЛЕДНИМ
+    # Чат-сообщения
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_message))
     
-    print("✅ Бот запущен с каталогом, корзиной и оплатой!")
+    # Напоминания
+    if application.job_queue:
+        application.job_queue.run_repeating(check_pending_tickets, interval=3600, first=10)
+    
+    print("✅ Бот запущен с каталогом и прямой оплатой!")
     application.run_polling()
