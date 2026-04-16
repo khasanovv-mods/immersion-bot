@@ -47,10 +47,9 @@ PRICE_LIST_TEXT = """
 
 ━━━━━━━━━━━━━━━━━━━━━
 
- Private block - 50₽
- Private skins - 20₽
- Private models - 30₽
- Private sborka - договор
+ Private skins - 40₽
+ Private models (inta + zdanie) - 50₽
+ Private sborka - 200-350₽
 
 ━━━━━━━━━━━━━━━━━━━━━
 
