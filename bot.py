@@ -37,7 +37,7 @@ def get_next_ticket_number():
     return ticket_counter
 
 # ========== ПРАЙС-ЛИСТ ==========
-PRICE_LIST_IMAGE = "https://fotora.ru/uploaded/?ID=PCQPD16042026204837"
+PRICE_LIST_IMAGE = "https://i.ibb.co/jZ1WtWRL/photo-2026-04-06-03-21-49-2.jpg"
 
 PRICE_LIST_TEXT = """
 💰 <b>ПРАЙС-ЛИСТ</b>
