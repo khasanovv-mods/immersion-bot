@@ -199,3 +199,35 @@ async def search_tickets(query):
                 'created_at': row[4]
             })
         return tickets
+
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Таблица заявок
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS tickets (...)
+        ''')
+        
+        # Таблица заказов
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                order_id TEXT UNIQUE NOT NULL,
+                product_name TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                payment_method TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        await db.commit()
+
+async def save_order(user_id, username, order_id, product_name, amount, currency, payment_method):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO orders (user_id, username, order_id, product_name, amount, currency, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, username, order_id, product_name, amount, currency, payment_method)
+        )
+        await db.commit()
