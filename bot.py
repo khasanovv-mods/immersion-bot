@@ -146,7 +146,11 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     parts = query.data.split("_")
     cat_id, prod_id = parts[1], parts[2]
-    product = CATALOG[cat_id]["products"][prod_id]
+    
+    product = CATALOG.get(cat_id, {}).get("products", {}).get(prod_id)
+    if not product:
+        await query.answer("❌ Товар не найден", show_alert=True)
+        return
     
     if user_id not in user_carts:
         user_carts[user_id] = {}
@@ -162,6 +166,7 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
     
     await query.answer(f"✅ {product['name']} добавлен в корзину!", show_alert=True)
+    logger.info(f"Товар {product['name']} добавлен в корзину пользователя {user_id}")
 
 # ========== КОРЗИНА ==========
 async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
