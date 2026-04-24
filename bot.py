@@ -73,7 +73,6 @@ main_keyboard = ReplyKeyboardMarkup(
 
 # ========== ПРАЙС-ЛИСТ ==========
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет прайс-лист с картинкой"""
     try:
         await update.message.reply_photo(
             photo=PRICE_LIST_IMAGE,
@@ -195,7 +194,6 @@ async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ТОЛЬКО сообщений в активном чате"""
     sender_id = update.effective_user.id
     
     if sender_id not in active_chats:
@@ -394,11 +392,6 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    status = await get_ticket_status(message_id)
-    if status and status != "pending":
-        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана", show_alert=True)
-        return ConversationHandler.END
-    
     context.user_data["reply_to_msg"] = message_id
     context.user_data["ticket_num"] = ticket_num
     
@@ -414,11 +407,6 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not original_msg_id:
         await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
-        return ConversationHandler.END
-    
-    status = await get_ticket_status(original_msg_id)
-    if status and status != "pending":
-        await update.message.reply_text(f"⛔ Заявка #{ticket_num} уже обработана.")
         return ConversationHandler.END
     
     user_id, _ = await get_user_by_message(original_msg_id)
@@ -466,16 +454,21 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    status = await get_ticket_status(message_id)
-    if status and status != "pending":
-        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана", show_alert=True)
-        return
-    
+    # Получаем данные о заявке
     user_id, _ = await get_user_by_message(message_id)
     admin_name = query.from_user.username or query.from_user.full_name
     
+    logger.info(f"✅ Админ {admin_name} одобряет заявку #{ticket_num}, user_id={user_id}")
+    
+    # Проверяем статус заявки
+    status = await get_ticket_status(message_id)
+    if status and status != "pending":
+        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status})", show_alert=True)
+        return
+    
     if user_id:
         try:
+            # Отправляем уведомление пользователю
             await context.bot.send_message(
                 chat_id=user_id,
                 text=(
@@ -486,9 +479,18 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
                 parse_mode=ParseMode.HTML
             )
-            await update_ticket_status(message_id, "approved")
-            await query.edit_message_reply_markup(reply_markup=None)
+            logger.info(f"✅ Уведомление об одобрении отправлено пользователю {user_id}")
             
+            # Обновляем статус в базе
+            await update_ticket_status(message_id, "approved")
+            
+            # Убираем кнопки
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except:
+                pass
+            
+            # Уведомляем админов
             for admin_id in ADMIN_IDS:
                 try:
                     await context.bot.send_message(
@@ -496,9 +498,11 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text=f"🎉 <b>Администратор @{admin_name}</b> одобрил идею <b>#{ticket_num}</b>.",
                         parse_mode=ParseMode.HTML
                     )
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
+                    
         except Exception as e:
+            logger.error(f"Ошибка при одобрении заявки: {e}")
             await query.answer(f"❌ Ошибка: {e}", show_alert=True)
     else:
         await query.answer("❌ Пользователь не найден", show_alert=True)
@@ -515,29 +519,43 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    status = await get_ticket_status(message_id)
-    if status and status != "pending":
-        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана", show_alert=True)
-        return
-    
+    # Получаем данные о заявке
     user_id, _ = await get_user_by_message(message_id)
     admin_name = query.from_user.username or query.from_user.full_name
     
+    logger.info(f"❌ Админ {admin_name} отклоняет заявку #{ticket_num}, user_id={user_id}")
+    
+    # Проверяем статус заявки
+    status = await get_ticket_status(message_id)
+    if status and status != "pending":
+        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status})", show_alert=True)
+        return
+    
     if user_id:
         try:
+            # Отправляем уведомление пользователю об отказе
             await context.bot.send_message(
                 chat_id=user_id,
                 text=(
                     f"📋 <b>Статус вашей идеи #{ticket_num}</b>\n\n"
                     f"К сожалению, ваша идея пока не может быть реализована.\n\n"
                     f"👤 <b>Администратор:</b> @{admin_name}\n"
-                    f"Но мы ценим ваше участие!"
+                    f"Но мы ценим ваше участие и будем рады новым предложениям!"
                 ),
                 parse_mode=ParseMode.HTML
             )
-            await update_ticket_status(message_id, "rejected")
-            await query.edit_message_reply_markup(reply_markup=None)
+            logger.info(f"✅ Уведомление об отказе отправлено пользователю {user_id}")
             
+            # Обновляем статус в базе
+            await update_ticket_status(message_id, "rejected")
+            
+            # Убираем кнопки
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except:
+                pass
+            
+            # Уведомляем админов
             for admin_id in ADMIN_IDS:
                 try:
                     await context.bot.send_message(
@@ -545,9 +563,11 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text=f"📋 <b>Администратор @{admin_name}</b> отклонил идею <b>#{ticket_num}</b>.",
                         parse_mode=ParseMode.HTML
                     )
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
+                    
         except Exception as e:
+            logger.error(f"Ошибка при отказе заявки: {e}")
             await query.answer(f"❌ Ошибка: {e}", show_alert=True)
     else:
         await query.answer("❌ Пользователь не найден", show_alert=True)
@@ -614,5 +634,5 @@ if __name__ == "__main__":
         job_queue.run_repeating(check_pending_tickets, interval=3600, first=10)
         logger.info("✅ Напоминания настроены (каждый час)")
     
-    print("✅ Бот запущен с прайс-листом!")
+    print("✅ Бот запущен!")
     application.run_polling()
