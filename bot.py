@@ -105,7 +105,6 @@ async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
     
-    # ВАЖНО: используем decline_ для чата, чтобы не пересекаться с reject_ для идей
     admin_kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Принять", callback_data=f"accept_{user_id}"),
@@ -171,7 +170,6 @@ async def accept_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def decline_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отклонение запроса на чат (использует decline_ вместо reject_)"""
     query = update.callback_query
     await query.answer()
     
@@ -316,11 +314,14 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = update.message.text
     message_id = update.message.message_id
     
-    # ВАЖНО: используем reject_ для идей, decline_ для чата
+    # Три кнопки: Одобрить, Отказать и Ответить
     admin_kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{message_id}_{ticket_num}"),
             InlineKeyboardButton("❌ Отказать", callback_data=f"reject_{message_id}_{ticket_num}")
+        ],
+        [
+            InlineKeyboardButton("💬 Ответить", callback_data=f"reply_{message_id}_{ticket_num}")
         ]
     ])
     
@@ -384,6 +385,7 @@ async def process_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кнопка '💬 Ответить' для идей и вопросов"""
     query = update.callback_query
     await query.answer()
     
@@ -395,6 +397,8 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
+    logger.info(f"💬 Админ {query.from_user.username} нажал 'Ответить' на заявку #{ticket_num}")
+    
     context.user_data["reply_to_msg"] = message_id
     context.user_data["ticket_num"] = ticket_num
     
@@ -402,6 +406,7 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_REPLY
 
 async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправка ответа пользователю (для идей и вопросов)"""
     if update.effective_user.id not in ADMIN_IDS:
         return ConversationHandler.END
     
@@ -412,15 +417,17 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
         return ConversationHandler.END
     
-    user_id, _ = await get_user_by_message(original_msg_id)
+    user_id, ticket_type = await get_user_by_message(original_msg_id)
     admin_name = update.effective_user.username or update.effective_user.full_name
+    
+    logger.info(f"💬 Отправка ответа: user_id={user_id}, ticket_num={ticket_num}, admin={admin_name}")
     
     if user_id:
         try:
             await context.bot.send_message(
                 chat_id=user_id,
                 text=(
-                    f"📬 <b>Ответ на ваш вопрос #{ticket_num}</b>\n\n"
+                    f"📬 <b>Ответ от команды на заявку #{ticket_num}</b>\n\n"
                     f"👤 <b>Администратор:</b> @{admin_name}\n"
                     f"📝 <b>Ответ:</b>\n{update.message.text}"
                 ),
@@ -429,11 +436,12 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_ticket_status(original_msg_id, "answered")
             await update.message.reply_text(f"✅ Ответ на заявку #{ticket_num} отправлен!")
             
+            # Уведомляем админов
             for admin in ADMIN_IDS:
                 try:
                     await context.bot.send_message(
                         chat_id=admin,
-                        text=f"✅ <b>Администратор @{admin_name}</b> ответил на вопрос <b>#{ticket_num}</b>.",
+                        text=f"💬 <b>Администратор @{admin_name}</b> ответил на заявку <b>#{ticket_num}</b>.\n📝 Ответ: {update.message.text[:100]}{'...' if len(update.message.text) > 100 else ''}",
                         parse_mode=ParseMode.HTML
                     )
                 except:
@@ -501,7 +509,6 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ Пользователь не найден", show_alert=True)
 
 async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отклонение ИДЕИ (не чата!)"""
     query = update.callback_query
     await query.answer()
     
@@ -605,12 +612,12 @@ if __name__ == "__main__":
     # Прайс-лист
     application.add_handler(MessageHandler(filters.Regex("^💰 Прайс-лист$"), show_price_list))
     
-    # Чат — используем decline_ для кнопок чата
+    # Чат
     application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
     application.add_handler(CallbackQueryHandler(accept_chat, pattern="^accept_"))
     application.add_handler(CallbackQueryHandler(decline_chat, pattern="^decline_"))
     
-    # Заявки — reject_ только для идей
+    # Заявки
     application.add_handler(idea_conv)
     application.add_handler(question_conv)
     application.add_handler(reply_conv)
