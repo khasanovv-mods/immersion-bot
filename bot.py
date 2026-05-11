@@ -105,10 +105,11 @@ async def request_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
     
+    # ВАЖНО: используем decline_ для чата, чтобы не пересекаться с reject_ для идей
     admin_kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Принять", callback_data=f"accept_{user_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}")
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"decline_{user_id}")
         ]
     ])
     
@@ -169,7 +170,8 @@ async def accept_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
-async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def decline_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отклонение запроса на чат (использует decline_ вместо reject_)"""
     query = update.callback_query
     await query.answer()
     
@@ -190,8 +192,8 @@ async def reject_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=user_id,
             text="❌ К сожалению, администраторы сейчас не могут ответить."
         )
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Ошибка отправки пользователю: {e}")
 
 async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
@@ -314,6 +316,7 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = update.message.text
     message_id = update.message.message_id
     
+    # ВАЖНО: используем reject_ для идей, decline_ для чата
     admin_kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{message_id}_{ticket_num}"),
@@ -498,6 +501,7 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("❌ Пользователь не найден", show_alert=True)
 
 async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отклонение ИДЕИ (не чата!)"""
     query = update.callback_query
     await query.answer()
     
@@ -601,19 +605,19 @@ if __name__ == "__main__":
     # Прайс-лист
     application.add_handler(MessageHandler(filters.Regex("^💰 Прайс-лист$"), show_price_list))
     
-    # Чат
+    # Чат — используем decline_ для кнопок чата
     application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
     application.add_handler(CallbackQueryHandler(accept_chat, pattern="^accept_"))
-    application.add_handler(CallbackQueryHandler(reject_chat, pattern="^reject_"))
+    application.add_handler(CallbackQueryHandler(decline_chat, pattern="^decline_"))
     
-    # Заявки
+    # Заявки — reject_ только для идей
     application.add_handler(idea_conv)
     application.add_handler(question_conv)
     application.add_handler(reply_conv)
     application.add_handler(CallbackQueryHandler(approve_button, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(reject_button, pattern="^reject_"))
     
-    # Чат
+    # Чат-сообщения
     application.add_handler(chat_message_handler)
     
     # Напоминания
