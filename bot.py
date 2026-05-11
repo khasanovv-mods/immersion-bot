@@ -61,11 +61,42 @@ PRICE_LIST_TEXT = """
 <i>Цены актуальны на май 2026 г.</i>
 """
 
+# ========== ТЕКСТ ДЛЯ КНОПКИ "НАШ LAUNCHER" ==========
+LAUNCHER_TEXT = """
+🚀 <b>НАШ LAUNCHER</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+
+Привет! Ты в одном шаге от того, чтобы получить доступ к нашему эксклюзивному лаунчеру! 🔥
+
+📥 <b>ССЫЛКА НА СКАЧИВАНИЕ:</b>
+<a href="https://disk.yandex.ru/d/8lKIo1m-r5pVPQ">Нажми сюда, чтобы скачать</a>
+
+✨ <b>ПРЕИМУЩЕСТВА НАШЕГО ЛАУНЧЕРА:</b>
+• 🚀 Мгновенный запуск игры
+• 🎨 Уникальные интерфейс
+• 🔒 Инжект ReShade | ASI
+• 👥 Поддержка 24/7
+
+📌 <b>КАК УСТАНОВИТЬ:</b>
+1️⃣ Скачай лаунчер по ссылке выше
+2️⃣ Запусти установщик
+3️⃣ Играй с удовольствием!
+
+❓ <b>ЕСТЬ ВОПРОСЫ?</b>
+Нажми «📞 Связь с администрацией» и задай их нам!
+
+━━━━━━━━━━━━━━━━━━━━━
+
+<i>Последнее обновление лаунчера: апрель 2026 г.</i>
+"""
+
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="💡 Отправить идею")],
         [KeyboardButton(text="❓ Задать вопрос")],
         [KeyboardButton(text="💰 Прайс-лист")],
+        [KeyboardButton(text="🚀 Наш Launcher")],
         [KeyboardButton(text="📞 Связь с администрацией")]
     ],
     resize_keyboard=True
@@ -89,6 +120,16 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_keyboard,
             disable_web_page_preview=True
         )
+
+# ========== НАШ LAUNCHER ==========
+async def show_launcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        LAUNCHER_TEXT,
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_keyboard,
+        disable_web_page_preview=False
+    )
+    logger.info(f"🚀 Информация о лаунчере отправлена пользователю {update.effective_user.id}")
 
 # ========== ЧАТ С АДМИНИСТРАЦИЕЙ ==========
 
@@ -314,7 +355,6 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = update.message.text
     message_id = update.message.message_id
     
-    # Три кнопки: Одобрить, Отказать и Ответить
     admin_kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{message_id}_{ticket_num}"),
@@ -385,7 +425,6 @@ async def process_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Кнопка '💬 Ответить' для идей и вопросов"""
     query = update.callback_query
     await query.answer()
     
@@ -406,7 +445,6 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_REPLY
 
 async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправка ответа пользователю (для идей и вопросов)"""
     if update.effective_user.id not in ADMIN_IDS:
         return ConversationHandler.END
     
@@ -436,7 +474,6 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_ticket_status(original_msg_id, "answered")
             await update.message.reply_text(f"✅ Ответ на заявку #{ticket_num} отправлен!")
             
-            # Уведомляем админов
             for admin in ADMIN_IDS:
                 try:
                     await context.bot.send_message(
@@ -611,6 +648,9 @@ if __name__ == "__main__":
     
     # Прайс-лист
     application.add_handler(MessageHandler(filters.Regex("^💰 Прайс-лист$"), show_price_list))
+    
+    # Наш Launcher
+    application.add_handler(MessageHandler(filters.Regex("^🚀 Наш Launcher$"), show_launcher))
     
     # Чат
     application.add_handler(MessageHandler(filters.Regex("^📞 Связь с администрацией$"), request_chat))
