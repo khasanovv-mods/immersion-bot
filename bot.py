@@ -425,6 +425,7 @@ async def process_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кнопка '💬 Ответить' для идей и вопросов (с защитой от повторов)"""
     query = update.callback_query
     await query.answer()
     
@@ -436,6 +437,12 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
+    # ✅ ПРОВЕРКА СТАТУСА: нельзя ответить повторно
+    status = await get_ticket_status(message_id)
+    if status and status != "pending":
+        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status})", show_alert=True)
+        return ConversationHandler.END
+    
     logger.info(f"💬 Админ {query.from_user.username} нажал 'Ответить' на заявку #{ticket_num}")
     
     context.user_data["reply_to_msg"] = message_id
@@ -445,6 +452,7 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_REPLY
 
 async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправка ответа пользователю (для идей и вопросов)"""
     if update.effective_user.id not in ADMIN_IDS:
         return ConversationHandler.END
     
@@ -453,6 +461,12 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not original_msg_id:
         await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
+        return ConversationHandler.END
+    
+    # ✅ ПОВТОРНАЯ ПРОВЕРКА перед отправкой
+    status = await get_ticket_status(original_msg_id)
+    if status and status != "pending":
+        await update.message.reply_text(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status}). Ответ не отправлен.")
         return ConversationHandler.END
     
     user_id, ticket_type = await get_user_by_message(original_msg_id)
@@ -474,6 +488,7 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_ticket_status(original_msg_id, "answered")
             await update.message.reply_text(f"✅ Ответ на заявку #{ticket_num} отправлен!")
             
+            # Уведомляем админов
             for admin in ADMIN_IDS:
                 try:
                     await context.bot.send_message(
@@ -503,6 +518,12 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("_")
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
+    
+    # ✅ ПРОВЕРКА СТАТУСА
+    status = await get_ticket_status(message_id)
+    if status and status != "pending":
+        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status})", show_alert=True)
+        return
     
     user_id, _ = await get_user_by_message(message_id)
     admin_name = query.from_user.username or query.from_user.full_name
@@ -558,6 +579,12 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("_")
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
+    
+    # ✅ ПРОВЕРКА СТАТУСА
+    status = await get_ticket_status(message_id)
+    if status and status != "pending":
+        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status})", show_alert=True)
+        return
     
     user_id, ticket_type = await get_user_by_message(message_id)
     admin_name = query.from_user.username or query.from_user.full_name
