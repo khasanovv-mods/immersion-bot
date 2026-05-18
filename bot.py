@@ -426,11 +426,6 @@ async def process_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ПРОВЕРКИ СТАТУСА ==========
 async def check_ticket_status_for_callback(message_id: int, ticket_num: str, action_name: str):
-    """
-    Проверяет статус заявки и возвращает текст всплывающего уведомления.
-    Если заявка в статусе 'pending' — возвращает None (можно продолжать).
-    Иначе — возвращает текст ошибки.
-    """
     status = await get_ticket_status(message_id)
     if status and status != "pending":
         status_text = {
@@ -454,7 +449,6 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    # ✅ Проверяем статус с всплывающим уведомлением
     error_msg = await check_ticket_status_for_callback(message_id, ticket_num, "Ответить")
     if error_msg:
         await query.answer(error_msg, show_alert=True)
@@ -465,10 +459,13 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["reply_to_msg"] = message_id
     context.user_data["ticket_num"] = ticket_num
     
-    await query.message.reply_text(f"✏️ Напишите ответ пользователю (заявка #{ticket_num}):")
+    await query.message.reply_text(
+        f"✏️ Напишите ответ пользователю (заявка #{ticket_num}):\n"
+        f"Можно отправить текст, фото, видео, документ или голосовое сообщение."
+    )
     return WAITING_REPLY
 
-# ========== ОТПРАВКА ОТВЕТА ==========
+# ========== ОТПРАВКА ОТВЕТА (ТЕКСТ) ==========
 async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return ConversationHandler.END
@@ -480,7 +477,6 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
         return ConversationHandler.END
     
-    # ✅ Повторная проверка перед отправкой
     error_msg = await check_ticket_status_for_callback(original_msg_id, ticket_num, "Ответить")
     if error_msg:
         await update.message.reply_text(error_msg)
@@ -488,8 +484,6 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id, ticket_type = await get_user_by_message(original_msg_id)
     admin_name = update.effective_user.username or update.effective_user.full_name
-    
-    logger.info(f"💬 Отправка ответа: user_id={user_id}, ticket_num={ticket_num}, admin={admin_name}")
     
     if user_id:
         try:
@@ -509,7 +503,216 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.send_message(
                         chat_id=admin,
-                        text=f"💬 <b>Администратор @{admin_name}</b> ответил на заявку <b>#{ticket_num}</b>.\n📝 Ответ: {update.message.text[:100]}{'...' if len(update.message.text) > 100 else ''}",
+                        text=f"💬 <b>Администратор @{admin_name}</b> ответил на заявку <b>#{ticket_num}</b>.",
+                        parse_mode=ParseMode.HTML
+                    )
+                except:
+                    pass
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+    else:
+        await update.message.reply_text("❌ Пользователь не найден")
+    
+    return ConversationHandler.END
+
+# ========== ОТПРАВКА ОТВЕТА (ФОТО) ==========
+async def send_reply_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return ConversationHandler.END
+    
+    original_msg_id = context.user_data.get("reply_to_msg")
+    ticket_num = context.user_data.get("ticket_num", "?")
+    
+    if not original_msg_id:
+        await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
+        return ConversationHandler.END
+    
+    error_msg = await check_ticket_status_for_callback(original_msg_id, ticket_num, "Ответить")
+    if error_msg:
+        await update.message.reply_text(error_msg)
+        return ConversationHandler.END
+    
+    user_id, ticket_type = await get_user_by_message(original_msg_id)
+    admin_name = update.effective_user.username or update.effective_user.full_name
+    
+    caption = update.message.caption or ""
+    
+    if user_id:
+        try:
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=update.message.photo[-1].file_id,
+                caption=(
+                    f"📬 <b>Ответ от команды на заявку #{ticket_num}</b>\n\n"
+                    f"👤 <b>Администратор:</b> @{admin_name}\n"
+                    f"📝 <b>Ответ:</b>\n{caption}"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            await update_ticket_status(original_msg_id, "answered")
+            await update.message.reply_text(f"✅ Ответ на заявку #{ticket_num} отправлен!")
+            
+            for admin in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin,
+                        text=f"💬 <b>Администратор @{admin_name}</b> ответил на заявку <b>#{ticket_num}</b> (фото).",
+                        parse_mode=ParseMode.HTML
+                    )
+                except:
+                    pass
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+    else:
+        await update.message.reply_text("❌ Пользователь не найден")
+    
+    return ConversationHandler.END
+
+# ========== ОТПРАВКА ОТВЕТА (ВИДЕО) ==========
+async def send_reply_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return ConversationHandler.END
+    
+    original_msg_id = context.user_data.get("reply_to_msg")
+    ticket_num = context.user_data.get("ticket_num", "?")
+    
+    if not original_msg_id:
+        await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
+        return ConversationHandler.END
+    
+    error_msg = await check_ticket_status_for_callback(original_msg_id, ticket_num, "Ответить")
+    if error_msg:
+        await update.message.reply_text(error_msg)
+        return ConversationHandler.END
+    
+    user_id, ticket_type = await get_user_by_message(original_msg_id)
+    admin_name = update.effective_user.username or update.effective_user.full_name
+    
+    caption = update.message.caption or ""
+    
+    if user_id:
+        try:
+            await context.bot.send_video(
+                chat_id=user_id,
+                video=update.message.video.file_id,
+                caption=(
+                    f"📬 <b>Ответ от команды на заявку #{ticket_num}</b>\n\n"
+                    f"👤 <b>Администратор:</b> @{admin_name}\n"
+                    f"📝 <b>Ответ:</b>\n{caption}"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            await update_ticket_status(original_msg_id, "answered")
+            await update.message.reply_text(f"✅ Ответ на заявку #{ticket_num} отправлен!")
+            
+            for admin in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin,
+                        text=f"💬 <b>Администратор @{admin_name}</b> ответил на заявку <b>#{ticket_num}</b> (видео).",
+                        parse_mode=ParseMode.HTML
+                    )
+                except:
+                    pass
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+    else:
+        await update.message.reply_text("❌ Пользователь не найден")
+    
+    return ConversationHandler.END
+
+# ========== ОТПРАВКА ОТВЕТА (ДОКУМЕНТ) ==========
+async def send_reply_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return ConversationHandler.END
+    
+    original_msg_id = context.user_data.get("reply_to_msg")
+    ticket_num = context.user_data.get("ticket_num", "?")
+    
+    if not original_msg_id:
+        await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
+        return ConversationHandler.END
+    
+    error_msg = await check_ticket_status_for_callback(original_msg_id, ticket_num, "Ответить")
+    if error_msg:
+        await update.message.reply_text(error_msg)
+        return ConversationHandler.END
+    
+    user_id, ticket_type = await get_user_by_message(original_msg_id)
+    admin_name = update.effective_user.username or update.effective_user.full_name
+    
+    caption = update.message.caption or ""
+    
+    if user_id:
+        try:
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=update.message.document.file_id,
+                caption=(
+                    f"📬 <b>Ответ от команды на заявку #{ticket_num}</b>\n\n"
+                    f"👤 <b>Администратор:</b> @{admin_name}\n"
+                    f"📝 <b>Ответ:</b>\n{caption}"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            await update_ticket_status(original_msg_id, "answered")
+            await update.message.reply_text(f"✅ Ответ на заявку #{ticket_num} отправлен!")
+            
+            for admin in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin,
+                        text=f"💬 <b>Администратор @{admin_name}</b> ответил на заявку <b>#{ticket_num}</b> (документ).",
+                        parse_mode=ParseMode.HTML
+                    )
+                except:
+                    pass
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+    else:
+        await update.message.reply_text("❌ Пользователь не найден")
+    
+    return ConversationHandler.END
+
+# ========== ОТПРАВКА ОТВЕТА (ГОЛОСОВОЕ) ==========
+async def send_reply_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return ConversationHandler.END
+    
+    original_msg_id = context.user_data.get("reply_to_msg")
+    ticket_num = context.user_data.get("ticket_num", "?")
+    
+    if not original_msg_id:
+        await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
+        return ConversationHandler.END
+    
+    error_msg = await check_ticket_status_for_callback(original_msg_id, ticket_num, "Ответить")
+    if error_msg:
+        await update.message.reply_text(error_msg)
+        return ConversationHandler.END
+    
+    user_id, ticket_type = await get_user_by_message(original_msg_id)
+    admin_name = update.effective_user.username or update.effective_user.full_name
+    
+    if user_id:
+        try:
+            await context.bot.send_voice(
+                chat_id=user_id,
+                voice=update.message.voice.file_id,
+                caption=(
+                    f"📬 <b>Ответ от команды на заявку #{ticket_num}</b>\n\n"
+                    f"👤 <b>Администратор:</b> @{admin_name}"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            await update_ticket_status(original_msg_id, "answered")
+            await update.message.reply_text(f"✅ Ответ на заявку #{ticket_num} отправлен!")
+            
+            for admin in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin,
+                        text=f"💬 <b>Администратор @{admin_name}</b> ответил на заявку <b>#{ticket_num}</b> (голосовое).",
                         parse_mode=ParseMode.HTML
                     )
                 except:
@@ -534,7 +737,6 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    # ✅ Проверяем статус с всплывающим уведомлением
     error_msg = await check_ticket_status_for_callback(message_id, ticket_num, "Одобрить")
     if error_msg:
         await query.answer(error_msg, show_alert=True)
@@ -542,8 +744,6 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id, _ = await get_user_by_message(message_id)
     admin_name = query.from_user.username or query.from_user.full_name
-    
-    logger.info(f"🟢 Одобрение: user_id={user_id}, ticket_num={ticket_num}, admin={admin_name}")
     
     if user_id:
         try:
@@ -557,8 +757,6 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
                 parse_mode=ParseMode.HTML
             )
-            logger.info(f"✅ Уведомление об одобрении отправлено пользователю {user_id}")
-            
             await update_ticket_status(message_id, "approved")
             
             try:
@@ -576,7 +774,6 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
         except Exception as e:
-            logger.error(f"Ошибка при одобрении: {e}")
             await query.answer(f"❌ Ошибка: {e}", show_alert=True)
     else:
         await query.answer("❌ Пользователь не найден в базе данных", show_alert=True)
@@ -594,7 +791,6 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    # ✅ Проверяем статус с всплывающим уведомлением
     error_msg = await check_ticket_status_for_callback(message_id, ticket_num, "Отказать")
     if error_msg:
         await query.answer(error_msg, show_alert=True)
@@ -603,14 +799,12 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id, ticket_type = await get_user_by_message(message_id)
     admin_name = query.from_user.username or query.from_user.full_name
     
-    logger.info(f"🔴 Отказ: user_id={user_id}, ticket_num={ticket_num}, admin={admin_name}")
-    
     if not user_id:
         await query.answer("❌ Пользователь не найден в базе данных", show_alert=True)
         return
     
     try:
-        result = await context.bot.send_message(
+        await context.bot.send_message(
             chat_id=user_id,
             text=(
                 f"📋 <b>Статус вашей идеи #{ticket_num}</b>\n\n"
@@ -620,8 +814,6 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode=ParseMode.HTML
         )
-        
-        logger.info(f"✅ Сообщение об отказе отправлено пользователю {user_id}")
         
         await update_ticket_status(message_id, "rejected")
         
@@ -641,7 +833,6 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
                 
     except Exception as e:
-        logger.error(f"Ошибка при отказе заявки: {e}")
         await query.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -669,9 +860,18 @@ if __name__ == "__main__":
         fallbacks=[CommandHandler("cancel", cancel)]
     )
     
+    # Обработчики для ответа: текст, фото, видео, документ, голосовое
     reply_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(reply_button, pattern="^reply_")],
-        states={WAITING_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_reply)]},
+        states={
+            WAITING_REPLY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, send_reply),
+                MessageHandler(filters.PHOTO, send_reply_photo),
+                MessageHandler(filters.VIDEO, send_reply_video),
+                MessageHandler(filters.Document.ALL, send_reply_document),
+                MessageHandler(filters.VOICE, send_reply_voice)
+            ]
+        },
         fallbacks=[CommandHandler("cancel", cancel)]
     )
     
