@@ -424,23 +424,40 @@ async def process_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+# ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ПРОВЕРКИ СТАТУСА ==========
+async def check_ticket_status_for_callback(message_id: int, ticket_num: str, action_name: str):
+    """
+    Проверяет статус заявки и возвращает текст всплывающего уведомления.
+    Если заявка в статусе 'pending' — возвращает None (можно продолжать).
+    Иначе — возвращает текст ошибки.
+    """
+    status = await get_ticket_status(message_id)
+    if status and status != "pending":
+        status_text = {
+            "approved": "✅ Одобрено",
+            "rejected": "❌ Отклонено",
+            "answered": "💬 Отвечено"
+        }.get(status, status)
+        return f"⛔ Заявка #{ticket_num} уже обработана!\n\nСтатус: {status_text}\nДействие «{action_name}» недоступно."
+    return None
+
+# ========== КНОПКА "ОТВЕТИТЬ" ==========
 async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Кнопка '💬 Ответить' для идей и вопросов (с защитой от повторов)"""
     query = update.callback_query
     await query.answer()
     
     if query.from_user.id not in ADMIN_IDS:
-        await query.answer("⛔ Нет прав", show_alert=True)
+        await query.answer("⛔ У вас нет прав для этого действия", show_alert=True)
         return ConversationHandler.END
     
     parts = query.data.split("_")
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    # ✅ ПРОВЕРКА СТАТУСА: нельзя ответить повторно
-    status = await get_ticket_status(message_id)
-    if status and status != "pending":
-        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status})", show_alert=True)
+    # ✅ Проверяем статус с всплывающим уведомлением
+    error_msg = await check_ticket_status_for_callback(message_id, ticket_num, "Ответить")
+    if error_msg:
+        await query.answer(error_msg, show_alert=True)
         return ConversationHandler.END
     
     logger.info(f"💬 Админ {query.from_user.username} нажал 'Ответить' на заявку #{ticket_num}")
@@ -451,8 +468,8 @@ async def reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(f"✏️ Напишите ответ пользователю (заявка #{ticket_num}):")
     return WAITING_REPLY
 
+# ========== ОТПРАВКА ОТВЕТА ==========
 async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправка ответа пользователю (для идей и вопросов)"""
     if update.effective_user.id not in ADMIN_IDS:
         return ConversationHandler.END
     
@@ -463,10 +480,10 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка: не найден ID сообщения")
         return ConversationHandler.END
     
-    # ✅ ПОВТОРНАЯ ПРОВЕРКА перед отправкой
-    status = await get_ticket_status(original_msg_id)
-    if status and status != "pending":
-        await update.message.reply_text(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status}). Ответ не отправлен.")
+    # ✅ Повторная проверка перед отправкой
+    error_msg = await check_ticket_status_for_callback(original_msg_id, ticket_num, "Ответить")
+    if error_msg:
+        await update.message.reply_text(error_msg)
         return ConversationHandler.END
     
     user_id, ticket_type = await get_user_by_message(original_msg_id)
@@ -488,7 +505,6 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update_ticket_status(original_msg_id, "answered")
             await update.message.reply_text(f"✅ Ответ на заявку #{ticket_num} отправлен!")
             
-            # Уведомляем админов
             for admin in ADMIN_IDS:
                 try:
                     await context.bot.send_message(
@@ -505,24 +521,23 @@ async def send_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
+# ========== КНОПКА "ОДОБРИТЬ" ==========
 async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    logger.info(f"🟢 approve_button вызвана! data={query.data}")
-    
     if query.from_user.id not in ADMIN_IDS:
-        await query.answer("⛔ Нет прав", show_alert=True)
+        await query.answer("⛔ У вас нет прав для этого действия", show_alert=True)
         return
     
     parts = query.data.split("_")
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    # ✅ ПРОВЕРКА СТАТУСА
-    status = await get_ticket_status(message_id)
-    if status and status != "pending":
-        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status})", show_alert=True)
+    # ✅ Проверяем статус с всплывающим уведомлением
+    error_msg = await check_ticket_status_for_callback(message_id, ticket_num, "Одобрить")
+    if error_msg:
+        await query.answer(error_msg, show_alert=True)
         return
     
     user_id, _ = await get_user_by_message(message_id)
@@ -564,26 +579,25 @@ async def approve_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Ошибка при одобрении: {e}")
             await query.answer(f"❌ Ошибка: {e}", show_alert=True)
     else:
-        await query.answer("❌ Пользователь не найден", show_alert=True)
+        await query.answer("❌ Пользователь не найден в базе данных", show_alert=True)
 
+# ========== КНОПКА "ОТКАЗАТЬ" ==========
 async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    logger.info(f"🔴 reject_button вызвана! data={query.data}")
-    
     if query.from_user.id not in ADMIN_IDS:
-        await query.answer("⛔ Нет прав", show_alert=True)
+        await query.answer("⛔ У вас нет прав для этого действия", show_alert=True)
         return
     
     parts = query.data.split("_")
     message_id = int(parts[1])
     ticket_num = parts[2] if len(parts) > 2 else "?"
     
-    # ✅ ПРОВЕРКА СТАТУСА
-    status = await get_ticket_status(message_id)
-    if status and status != "pending":
-        await query.answer(f"⛔ Заявка #{ticket_num} уже обработана (статус: {status})", show_alert=True)
+    # ✅ Проверяем статус с всплывающим уведомлением
+    error_msg = await check_ticket_status_for_callback(message_id, ticket_num, "Отказать")
+    if error_msg:
+        await query.answer(error_msg, show_alert=True)
         return
     
     user_id, ticket_type = await get_user_by_message(message_id)
@@ -592,13 +606,10 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"🔴 Отказ: user_id={user_id}, ticket_num={ticket_num}, admin={admin_name}")
     
     if not user_id:
-        logger.error(f"❌ user_id не найден для message_id={message_id}")
         await query.answer("❌ Пользователь не найден в базе данных", show_alert=True)
         return
     
     try:
-        logger.info(f"📤 Пытаемся отправить отказ пользователю {user_id}...")
-        
         result = await context.bot.send_message(
             chat_id=user_id,
             text=(
@@ -610,10 +621,9 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML
         )
         
-        logger.info(f"✅ Сообщение об отказе отправлено пользователю {user_id}, msg_id={result.message_id}")
+        logger.info(f"✅ Сообщение об отказе отправлено пользователю {user_id}")
         
         await update_ticket_status(message_id, "rejected")
-        logger.info(f"✅ Статус заявки обновлён на 'rejected'")
         
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -627,12 +637,11 @@ async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"📋 <b>Администратор @{admin_name}</b> отклонил идею <b>#{ticket_num}</b>.",
                     parse_mode=ParseMode.HTML
                 )
-                logger.info(f"✅ Админ {admin_id} уведомлён об отказе")
-            except Exception as e:
-                logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
+            except:
+                pass
                 
     except Exception as e:
-        logger.error(f"❌ Ошибка при отказе заявки: {e}", exc_info=True)
+        logger.error(f"Ошибка при отказе заявки: {e}")
         await query.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
